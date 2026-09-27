@@ -26,8 +26,9 @@ use std::sync::{Arc, Weak};
 
 use rmcp::ErrorData as McpError;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+    Implementation, ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities,
+    ServerInfo,
 };
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler};
@@ -470,17 +471,29 @@ impl ServerHandler for ManipuladorMcpHttp {
     async fn list_tools(
         &self,
         _: Option<PaginatedRequestParams>,
-        _: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let politica = match self.politica() {
-            Some((_, p)) => p,
+        let tools = match self.politica() {
+            Some((_, p)) => ferramentas::tools_anunciadas(&p),
             // Gateway indo embora: superficie vazia em vez de erro. Um
             // `tools/list` durante o shutdown nao e falha do chamador.
-            None => return Ok(ListToolsResult::with_all_items(Vec::new())),
+            None => Vec::new(),
         };
-        Ok(ListToolsResult::with_all_items(
-            ferramentas::tools_anunciadas(&politica),
-        ))
+        let result = ListToolsResult::with_all_items(tools);
+        // #1518 / SEP-2549: desde a spec `2026-07-28` o `tools/list` EXIGE
+        // `ttlMs` e `cacheScope`, e o `with_all_items` os deixa em `None`, fora
+        // do fio: o host descartava a lista inteira. Dicas so para quem negociou
+        // >= 2026-07-28, como o `#[tool_handler]` do rmcp. TTL 0 porque a
+        // politica muda com a config; `Private` porque a lista depende dela e
+        // da credencial de quem chama.
+        let exige_dicas_de_cache = context
+            .protocol_version()
+            .is_some_and(|versao| versao >= ProtocolVersion::V_2026_07_28);
+        Ok(if exige_dicas_de_cache {
+            result.with_ttl_ms(0).with_cache_scope(CacheScope::Private)
+        } else {
+            result
+        })
     }
 
     async fn call_tool(

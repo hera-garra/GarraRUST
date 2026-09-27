@@ -133,6 +133,17 @@ fn router_e_state(l: Ligacao) -> (axum::Router, Arc<AppState>) {
 }
 
 async fn pedir(router: axum::Router, bearer: Option<&str>, corpo: Value) -> Response<Body> {
+    pedir_com_cabecalhos(router, bearer, &[], corpo).await
+}
+
+/// `pedir` com cabecalhos a mais — o `MCP-Protocol-Version` que um host manda
+/// fora do `initialize`, por exemplo.
+async fn pedir_com_cabecalhos(
+    router: axum::Router,
+    bearer: Option<&str>,
+    cabecalhos: &[(&str, &str)],
+    corpo: Value,
+) -> Response<Body> {
     let mut builder = Request::builder()
         .method("POST")
         .uri("/mcp")
@@ -143,6 +154,9 @@ async fn pedir(router: axum::Router, bearer: Option<&str>, corpo: Value) -> Resp
         .header("host", "127.0.0.1:3888");
     if let Some(b) = bearer {
         builder = builder.header("authorization", b);
+    }
+    for (nome, valor) in cabecalhos {
+        builder = builder.header(*nome, *valor);
     }
     let mut req = builder
         .body(Body::from(corpo.to_string()))
@@ -324,6 +338,72 @@ async fn tools_list_mostra_as_cinco_quando_o_envio_esta_liberado() {
     let nomes = nomes_das_tools(&tools_list(Ligacao::leitura().com(true, true)).await);
     assert_eq!(nomes.len(), 5, "{nomes:?}");
     assert!(nomes.iter().any(|n| n == "garra_send_message"), "{nomes:?}");
+}
+
+/// Os metadados que um host na spec 2026-07-28 (o Claude Code) manda em todo
+/// pedido: no HTTP stateless eles vem junto do `MCP-Protocol-Version` e do
+/// `Mcp-Method` (SEP-2243), sem `initialize`.
+fn meta_2026_07_28() -> Value {
+    json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { "name": "teste-de-contrato", "version": "0" },
+        "io.modelcontextprotocol/clientCapabilities": {}
+    })
+}
+
+/// #1518 — um host na spec 2026-07-28 valida o `tools/list` contra o schema
+/// novo, que torna `ttlMs` e `cacheScope` obrigatorios (SEP-2549). Sem os dois
+/// ele descarta a lista inteira: a ponte fica "conectada" e sem nenhuma tool.
+#[tokio::test]
+async fn tools_list_na_spec_2026_07_28_leva_as_dicas_de_cache() {
+    let (router, _state) = router_e_state(Ligacao::leitura());
+    let lista = corpo_json(
+        pedir_com_cabecalhos(
+            router,
+            Some(BEARER),
+            &[
+                ("mcp-protocol-version", "2026-07-28"),
+                ("mcp-method", "tools/list"),
+            ],
+            rpc(2, "tools/list", json!({ "_meta": meta_2026_07_28() })),
+        )
+        .await,
+    )
+    .await;
+    assert!(!nomes_das_tools(&lista).is_empty(), "{lista}");
+    assert!(
+        lista["result"]["ttlMs"].is_u64(),
+        "ttlMs precisa ser inteiro >= 0: {lista}"
+    );
+    assert!(
+        matches!(
+            lista["result"]["cacheScope"].as_str(),
+            Some("public" | "private")
+        ),
+        "cacheScope precisa ser public|private: {lista}"
+    );
+}
+
+/// #1518 — host no protocolo legado segue recebendo o `tools/list` de sempre:
+/// as dicas de cache nasceram na 2026-07-28.
+#[tokio::test]
+async fn tools_list_legado_segue_sem_dicas_de_cache() {
+    let (router, _state) = router_e_state(Ligacao::leitura());
+    let lista = corpo_json(
+        pedir_com_cabecalhos(
+            router,
+            Some(BEARER),
+            &[("mcp-protocol-version", "2025-06-18")],
+            rpc(2, "tools/list", json!({})),
+        )
+        .await,
+    )
+    .await;
+    assert!(!nomes_das_tools(&lista).is_empty(), "{lista}");
+    assert!(
+        lista["result"].get("ttlMs").is_none() && lista["result"].get("cacheScope").is_none(),
+        "host legado recebeu dicas de cache: {lista}"
+    );
 }
 
 /// `tools/call garra_status` de ponta a ponta: JSON-RPC valido por fora,
