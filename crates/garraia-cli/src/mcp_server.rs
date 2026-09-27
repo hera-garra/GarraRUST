@@ -30,8 +30,8 @@ use anyhow::Result;
 use garraia_config::AppConfig;
 use rmcp::ErrorData as McpError;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler, ServiceExt};
@@ -505,14 +505,26 @@ impl ServerHandler for GarraToolHandler {
     async fn list_tools(
         &self,
         _: Option<PaginatedRequestParams>,
-        _: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        // rmcp 3.x: `ListToolsResult` ganhou os campos SEP-2322 (`result_type`) e
-        // SEP-2549 (`ttl_ms`/`cache_scope`); o construtor `with_all_items`
-        // preenche o padrão da spec (`result_type = COMPLETE`, resto `None`).
-        Ok(ListToolsResult::with_all_items(advertised_tools(
-            &self.policy,
-        )))
+        let result = ListToolsResult::with_all_items(advertised_tools(&self.policy));
+        // SEP-2549: desde a spec `2026-07-28` o `tools/list` EXIGE `ttlMs` e
+        // `cacheScope`, mas o rmcp 3.x modela os dois como `Option` e o
+        // `with_all_items` os deixa em `None` — fora do fio. O Claude Code
+        // valida o schema e recusava a lista inteira: servidor conectado e
+        // nenhuma tool. Mesmo critério do `#[tool_handler]` do rmcp: dicas só
+        // para quem negociou >= 2026-07-28; peer legado segue com o fio de
+        // antes. TTL 0 = sempre revalidar; `Private` porque a lista depende da
+        // política do operador (`GARRAIA_MCP_ENABLE_TOOLS`) e não deve ser
+        // compartilhada entre contextos de autorização.
+        let exige_dicas_de_cache = context
+            .protocol_version()
+            .is_some_and(|versao| versao >= ProtocolVersion::V_2026_07_28);
+        Ok(if exige_dicas_de_cache {
+            result.with_ttl_ms(0).with_cache_scope(CacheScope::Private)
+        } else {
+            result
+        })
     }
 
     // rmcp 3.x: o retorno passou a ser o enum MRTR-aware `CallToolResponse`;
@@ -1044,6 +1056,123 @@ mod tests {
         // rmcp 3.x: `tasks` (SEP-2663) saiu do struct `ServerCapabilities` e
         // virou uma extensão (SEP-1724) em `extensions` — o assert acima de
         // `extensions.is_none()` já garante "tasks must stay off".
+    }
+
+    // ─── tools/list sob a spec 2026-07-28 (SEP-2549) ───────────────────
+
+    /// Conversa JSON-RPC crua com o handler de verdade, atravessando o
+    /// dispatch real do rmcp num duplex em memória (zero rede, env ou FS):
+    /// envia as mensagens em ordem e devolve a resposta de cada requisição.
+    async fn conversa_jsonrpc(mensagens: &[JsonValue]) -> Vec<JsonValue> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let (cliente, servidor) = tokio::io::duplex(64 * 1024);
+        let handler =
+            GarraToolHandler::with_policy(Arc::new(AppConfig::default()), ServerPolicy::default());
+        let servidor = tokio::spawn(async move {
+            let service = handler
+                .serve(tokio::io::split(servidor))
+                .await
+                .expect("serve");
+            let _ = service.waiting().await;
+        });
+        let (leitura, mut escrita) = tokio::io::split(cliente);
+        let mut linhas = BufReader::new(leitura).lines();
+        let troca = async {
+            let mut respostas = Vec::new();
+            for msg in mensagens {
+                escrita
+                    .write_all(format!("{msg}\n").as_bytes())
+                    .await
+                    .expect("write");
+                let Some(id) = msg.get("id") else { continue };
+                loop {
+                    let linha = linhas
+                        .next_line()
+                        .await
+                        .expect("read")
+                        .expect("servidor fechou o canal");
+                    let resposta: JsonValue =
+                        serde_json::from_str(&linha).expect("resposta nao e JSON");
+                    if resposta.get("id") == Some(id) {
+                        respostas.push(resposta);
+                        break;
+                    }
+                }
+            }
+            respostas
+        };
+        let respostas = tokio::time::timeout(std::time::Duration::from_secs(10), troca)
+            .await
+            .expect("servidor MCP nao respondeu em 10s");
+        servidor.abort();
+        respostas
+    }
+
+    /// Regressão do "tools fetch failed" no `/mcp` do Claude Code: a spec
+    /// 2026-07-28 (SEP-2549) torna `ttlMs` e `cacheScope` OBRIGATÓRIOS no
+    /// `tools/list`, e o cliente valida o schema — sem os dois ele recusa a
+    /// lista inteira ("Invalid result for tools/list") e o servidor aparece
+    /// conectado mas sem nenhuma tool. As mensagens seguem o ciclo de vida
+    /// novo, como o Claude Code manda: `server/discover` e a versão em
+    /// `_meta` a cada requisição, sem `initialize`.
+    #[tokio::test]
+    async fn tools_list_leva_dicas_de_cache_exigidas_pela_2026_07_28() {
+        let meta = json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {"name": "teste", "version": "0"},
+            "io.modelcontextprotocol/clientCapabilities": {}
+        });
+        let respostas = conversa_jsonrpc(&[
+            json!({"jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": {"_meta": meta}}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {"_meta": meta}}),
+        ])
+        .await;
+        let result = &respostas[1]["result"];
+        assert!(
+            result["tools"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty()),
+            "tools/list sem tools: {}",
+            respostas[1]
+        );
+        assert!(
+            result["ttlMs"].is_u64(),
+            "ttlMs precisa ser inteiro >= 0: {result}"
+        );
+        assert!(
+            matches!(result["cacheScope"].as_str(), Some("public" | "private")),
+            "cacheScope precisa ser public|private: {result}"
+        );
+    }
+
+    /// Peers anteriores à 2026-07-28 seguem recebendo o `tools/list` de
+    /// sempre: as dicas de cache nasceram naquela revisão, e um cliente do
+    /// `initialize` legado não as conhece.
+    #[tokio::test]
+    async fn tools_list_de_peer_legado_segue_sem_dicas_de_cache() {
+        let respostas = conversa_jsonrpc(&[
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "teste", "version": "0"}
+            }}),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+        ])
+        .await;
+        let result = &respostas[1]["result"];
+        assert!(
+            result["tools"]
+                .as_array()
+                .is_some_and(|tools| !tools.is_empty()),
+            "tools/list sem tools: {}",
+            respostas[1]
+        );
+        assert!(
+            result.get("ttlMs").is_none() && result.get("cacheScope").is_none(),
+            "peer legado recebeu dicas de cache: {result}"
+        );
     }
 
     /// GAR-583 §4 invariant #2 — production code MUST NOT register
