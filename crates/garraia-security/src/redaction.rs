@@ -146,6 +146,137 @@ fn parte_de_uuid(bytes: &[u8], inicio: usize, fim: usize) -> bool {
     })
 }
 
+/// Separadores aceitos **entre** grupos de digitos de um telefone formatado
+/// (espaco, hifen, parenteses, underscore). Ponto de proposito fica de fora:
+/// e o mesmo caractere do separador decimal de timestamp (`36.123456789Z`) e
+/// de preco (`1.234,56`), e vira-lo ponte teria criado exatamente o falso
+/// positivo que o #1514 pede para evitar.
+fn e_separador_de_telefone(b: u8) -> bool {
+    matches!(b, b' ' | b'-' | b'(' | b')' | b'_')
+}
+
+/// Quantidade maxima de caracteres de separador entre dois grupos de digitos
+/// para ainda contar como a mesma ponte (`" ("`, `") "` tem 2; um hifen so, 1).
+/// Alem disso e texto solto, nao formatacao de telefone.
+const MAX_SEPARADORES_NA_PONTE: usize = 2;
+
+/// Quantidade maxima de grupos extras que a ponte anexa ao grupo ancora.
+/// Precisa cobrir o celular brasileiro com o nono digito separado
+/// (`"+55 11 9 8765 4321"` = ancora + 4 grupos), a forma mais comum do
+/// locale do projeto — um teto de 3 (achado da auditoria de seguranca do
+/// #1514) deixava esse formato inteiro sem mascara, porque nem a metade
+/// nem a ancora sozinhas batiam o limiar. O teto mais alto sozinho reabriria
+/// a lista de numeros curtos (`"1 2 3 4 5 6 7 8 9 10"`); quem impede isso e
+/// o discriminante em [`tem_grupo_de_telefone_plausivel`], nao este numero.
+const MAX_GRUPOS_ADICIONAIS: usize = 4;
+
+/// Ao menos um dos grupos mascarados tem 4+ digitos (prefixo ou sufixo de
+/// telefone real, nunca so DDD/pais)? Uma lista solta de numeros curtos
+/// (`"1 2 3 4 5 6 7 8 9 10"`, `"10 20 30 40 50"`) so tem grupos de 1-3
+/// digitos e nunca passa aqui, mesmo somando 10+ no total.
+fn tem_grupo_de_telefone_plausivel(grupos: &[usize]) -> bool {
+    grupos.iter().any(|&g| g >= 4)
+}
+
+/// `grupos` e exatamente dois grupos do mesmo tamanho, grandes o bastante
+/// para ser um intervalo numerico (`"100000-200000"`, contagem de linhas ou
+/// bytes) em vez de telefone — um telefone real quase nunca tem os dois
+/// blocos do mesmo tamanho quando ambos passam de 4 digitos.
+fn parece_intervalo(grupos: &[usize]) -> bool {
+    matches!(grupos, [a, b] if a == b && *a >= 5)
+}
+
+/// `grupos` (ja **completo** — so chamada depois que a ponte parou de
+/// crescer) e um numero grande com separador de milhar (`"1 234 567 890"`,
+/// `1.234.567,89` sem os pontos)? O primeiro grupo e o resto que sobra da
+/// direita (1 a 3 digitos) e **todo** grupo depois dele e um bloco cheio de
+/// exatamente 3 digitos. Precisa ser avaliada so no final: um celular NANP
+/// com DDI separado (`"+1 555 123 4567"`) tem o **prefixo** `[1,3,3]` igual
+/// ao de um numero de verdade com separador de milhar, e so o ultimo grupo
+/// (`4567`, nao `3` digitos) desfaz a ambiguidade — checar a cada grupo
+/// novo, em vez de no final, apagava todo celular NANP (achado da segunda
+/// rodada da auditoria de seguranca do #1514).
+///
+/// Limitacao aceita (3a rodada da auditoria, BAIXO): um numero real cujos
+/// **unicos** grupos apos o primeiro sejam todos de exatamente 3 digitos
+/// (`"+34 612 345 678"`, `[2,3,3,3]`) ainda casa esta forma e escapa
+/// inteiro — indistinguivel de `1 234 567 890` sem contexto semantico. Nao
+/// piorou nas rodadas seguintes; documentado em vez de perseguido.
+fn parece_numero_com_milhar(grupos: &[usize]) -> bool {
+    matches!(grupos, [primeiro, resto @ ..] if *primeiro <= 3
+        && resto.len() >= 2
+        && resto.iter().all(|&g| g == 3))
+}
+
+/// `grupos` fecha numa forma de data (`AAAA-MM-DD`, `DD-MM-AAAA` ou
+/// `DD-MM-AA`, com qualquer separador de telefone entre os grupos — o
+/// `CLAUDE.md` do projeto manda a primeira forma para toda data narrativa,
+/// e a segunda e como um usuario BR escreve data em texto livre)? So
+/// reconhecida com exatamente 3 grupos: com menos e inconclusivo, com mais a
+/// ponte ja passou da data.
+fn parece_data(grupos: &[usize]) -> bool {
+    matches!(grupos, [4, 2, 2] | [2, 2, 4] | [2, 2, 2])
+}
+
+/// A ponte, gastando ate `grupos_restantes` grupos a mais a partir de `fim`,
+/// alcanca algum grupo de 4+ digitos? Usada para decidir se um trecho que
+/// **agora** parece uma data deve mesmo parar ali: espiar so o proximo
+/// grupo nao bastava — um numero real com DDI separado
+/// (`"55-11-98-76-5432"`) fecha a forma de data (`[2,2,2]`) com o proximo
+/// grupo (`"76"`, 2 digitos) tambem curto, e so o **seguinte** (`"5432"`)
+/// prova que era telefone (achado da segunda rodada da auditoria de
+/// seguranca do #1514).
+///
+/// Efeito colateral aceito (3a rodada da auditoria, BAIXO, so sobre-mascara,
+/// nunca vaza): olhar 2 grupos a frente pode juntar uma data a um numero
+/// curto e depois um grupo de 4+ digitos que nao tem nada a ver com ela
+/// (`"2026-09-27 12 3456"`) — exige essa combinacao especifica de tamanhos
+/// e nao ocorre em timestamp real (que usa `:`, nao espaco, para a hora).
+fn ponte_alcanca_grupo_grande(bytes: &[u8], fim: usize, grupos_restantes: usize) -> bool {
+    let mut fim = fim;
+    let mut restantes = grupos_restantes;
+    while restantes > 0 {
+        let Some((novo_fim, digitos)) = estender_sobre_ponte(bytes, fim) else {
+            return false;
+        };
+        if digitos >= 4 {
+            return true;
+        }
+        fim = novo_fim;
+        restantes -= 1;
+    }
+    false
+}
+
+/// A partir de `fim` (logo apos um grupo de digitos ja aceito), tenta casar
+/// uma ponte: separadores de telefone seguidos de outro grupo de digitos que
+/// **nao** termine colado a letra. Devolve o novo fim e quantos digitos esse
+/// grupo novo acrescenta; `None` quando nao ha ponte, ela e comprida demais,
+/// ou o grupo encontrado seria ele mesmo um falso-positivo (`"...-9abc"`
+/// nao pode fazer o `9` engolir um telefone valido que vem antes dele).
+///
+/// So faz o **calculo**, nao aplica nada — quem chama decide se aceita
+/// (permite espiar antes de comprometer o guarda de data em
+/// [`mascarar_numeros_longos`]).
+fn estender_sobre_ponte(bytes: &[u8], fim: usize) -> Option<(usize, usize)> {
+    let mut j = fim;
+    while j < bytes.len() && e_separador_de_telefone(bytes[j]) {
+        j += 1;
+    }
+    let tamanho_ponte = j - fim;
+    if tamanho_ponte == 0 || tamanho_ponte > MAX_SEPARADORES_NA_PONTE {
+        return None;
+    }
+    let grupo_inicio = j;
+    while j < bytes.len() && bytes[j].is_ascii_digit() {
+        j += 1;
+    }
+    if j == grupo_inicio || (j < bytes.len() && bytes[j].is_ascii_alphabetic()) {
+        return None;
+    }
+    Some((j, j - grupo_inicio))
+}
+
 /// Mascara, no texto que vai para o log, toda sequencia de pelo menos
 /// [`DIGITOS_DE_IDENTIFICADOR`] digitos que nao esteja colada a letra ou a
 /// outro digito, deixando so os 4 ultimos (`…4321`).
@@ -163,6 +294,20 @@ fn parte_de_uuid(bytes: &[u8], inicio: usize, fim: usize) -> bool {
 /// quem depura. Um `+` antes do numero entra na mascara. Nao e usado no
 /// `redact_secrets`: la o texto e resultado de ferramenta, onde numero longo e
 /// conteudo legitimo.
+///
+/// Desde o #1514, tambem soma digitos atraves de espaco/hifen/parenteses
+/// (`"55 11 98765 4321"`, `"55-11-98765-4321"`, `"+55 (11) 98765-4321"`): a
+/// contagem original so via sequencia contigua, e um telefone com separador
+/// comum atravessava inteiro. O grupo ancora precisa passar no proprio
+/// `colado_antes` (letra colada antes) e no proprio [`parte_de_uuid`]
+/// **antes** de a ponte ser tentada — do contrario um id curto colado a letra
+/// (`"req5-5511987654321"`) ou o ultimo grupo, so-digitos, de um UUID
+/// (`"...-a716-446655440000 200 ok"`) arrastaria consigo, para a rejeicao (ou
+/// para fora da protecao de UUID), um trecho que nao devia ser mascarado.
+/// A ponte para de crescer assim que o total ja bate o limiar — sem isso, a
+/// mascara "so os 4 ultimos" vira "os 4 ultimos **bytes**" quando um numero
+/// curto e irrelevante gruda depois de um telefone que ja bastava sozinho
+/// (achado da revisao de codigo do #1514).
 pub fn mascarar_numeros_longos(input: &str) -> std::borrow::Cow<'_, str> {
     let bytes = input.as_bytes();
     let mut saida: Option<String> = None;
@@ -177,13 +322,45 @@ pub fn mascarar_numeros_longos(input: &str) -> std::borrow::Cow<'_, str> {
         while i < bytes.len() && bytes[i].is_ascii_digit() {
             i += 1;
         }
-        let fim = i;
+        let fim_ancora = i;
+        let mut fim = fim_ancora;
+        let mut total_digitos = fim - inicio;
+        let mut grupos = vec![total_digitos];
         let colado_antes = inicio > 0 && bytes[inicio - 1].is_ascii_alphabetic();
+        let veio_de_uuid = parte_de_uuid(bytes, inicio, fim_ancora);
+        if !colado_antes && !veio_de_uuid {
+            while total_digitos < DIGITOS_DE_IDENTIFICADOR && grupos.len() <= MAX_GRUPOS_ADICIONAIS
+            {
+                if parece_data(&grupos) {
+                    // So protege a data se a ponte, gastando o que resta do
+                    // teto de grupos, nao alcanca um grupo de 4+ digitos —
+                    // senao um numero real com essa forma casual
+                    // (`"55-11-98-76-5432"`) escaparia inteiro so por parecer
+                    // data no comeco. Olhar so o proximo grupo nao bastava: o
+                    // grupo seguinte a "76" ainda e curto, e so o de depois
+                    // (`"5432"`) desfaz a ambiguidade.
+                    let restantes = MAX_GRUPOS_ADICIONAIS.saturating_sub(grupos.len() - 1);
+                    if !ponte_alcanca_grupo_grande(bytes, fim, restantes) {
+                        break;
+                    }
+                }
+                let Some((novo_fim, digitos)) = estender_sobre_ponte(bytes, fim) else {
+                    break;
+                };
+                fim = novo_fim;
+                total_digitos += digitos;
+                grupos.push(digitos);
+            }
+        }
+        i = fim;
         let colado_depois = fim < bytes.len() && bytes[fim].is_ascii_alphabetic();
-        if fim - inicio < DIGITOS_DE_IDENTIFICADOR
+        if total_digitos < DIGITOS_DE_IDENTIFICADOR
             || colado_antes
             || colado_depois
-            || parte_de_uuid(bytes, inicio, fim)
+            || veio_de_uuid
+            || !tem_grupo_de_telefone_plausivel(&grupos)
+            || parece_intervalo(&grupos)
+            || parece_numero_com_milhar(&grupos)
         {
             continue;
         }
@@ -238,6 +415,206 @@ mod tests {
         for (entrada, esperado) in casos {
             assert_eq!(mascarar_numeros_longos(entrada), esperado, "{entrada}");
         }
+    }
+
+    /// #1514: telefone com separador comum (espaco, hifen, parenteses)
+    /// atravessava inteiro porque a contagem original so via sequencia
+    /// contigua de digitos. Os tres casos sao os do relato original.
+    #[test]
+    fn mascara_telefone_com_separadores_comuns() {
+        let casos = [
+            ("ligue 55 11 98765 4321 agora", "ligue \u{2026}4321 agora"),
+            ("ligue 55-11-98765-4321 agora", "ligue \u{2026}4321 agora"),
+            (
+                "ligue +55 (11) 98765-4321 agora",
+                "ligue \u{2026}4321 agora",
+            ),
+        ];
+        for (entrada, esperado) in casos {
+            assert_eq!(mascarar_numeros_longos(entrada), esperado, "{entrada}");
+        }
+    }
+
+    /// #1514, achado ALTO da auditoria de seguranca: celular brasileiro com o
+    /// nono digito separado em grupo proprio e a forma mais comum do locale
+    /// do projeto, e um teto de 3 grupos adicionais deixava passar inteiro
+    /// (ancora+3 pontes parava em 9 digitos, abaixo do limiar).
+    #[test]
+    fn mascara_celular_br_com_nono_digito_separado() {
+        let casos = [
+            ("ligue +55 11 9 8765 4321 agora", "ligue \u{2026}4321 agora"),
+            (
+                "ligue +55 (11) 9 8765-4321 agora",
+                "ligue \u{2026}4321 agora",
+            ),
+        ];
+        for (entrada, esperado) in casos {
+            assert_eq!(mascarar_numeros_longos(entrada), esperado, "{entrada}");
+        }
+    }
+
+    /// #1514, achado da revisao de codigo: o ultimo grupo de um UUID, todo em
+    /// digitos, e seguido de um numero curto e irrelevante — a ponte nao pode
+    /// "roubar" a protecao de UUID so porque o `fim` foi estendido para alem
+    /// dela antes de `parte_de_uuid` ser avaliada.
+    #[test]
+    fn uuid_seguido_de_numero_curto_continua_protegido() {
+        assert_eq!(
+            mascarar_numeros_longos("sessao 550e8400-e29b-41d4-a716-446655440000 200 ok"),
+            "sessao 550e8400-e29b-41d4-a716-446655440000 200 ok"
+        );
+    }
+
+    /// #1514, achado da revisao de codigo: quando o grupo ancora sozinho ja
+    /// bate o limiar, a ponte nao pode tentar esticar mais — senao "os 4
+    /// ultimos digitos" vira "os 4 ultimos bytes", que podem nem ser digito.
+    #[test]
+    fn telefone_que_ja_basta_sozinho_nao_engole_numero_seguinte() {
+        assert_eq!(
+            mascarar_numeros_longos("whatsapp-5511987654321 200"),
+            "whatsapp-\u{2026}4321 200"
+        );
+        assert_eq!(
+            mascarar_numeros_longos("id 1234567890 12"),
+            "id \u{2026}7890 12"
+        );
+    }
+
+    /// #1514, achado da auditoria de seguranca: um intervalo numerico
+    /// (contagem de linha, faixa de byte) com dois blocos iguais e grandes
+    /// nao e telefone.
+    #[test]
+    fn intervalo_numerico_nao_e_mascarado() {
+        assert_eq!(
+            mascarar_numeros_longos("linhas 100000-200000 lidas"),
+            "linhas 100000-200000 lidas"
+        );
+    }
+
+    /// #1514, achado da revisao de codigo: numero grande com separador de
+    /// milhar (blocos de exatamente 3 digitos apos o primeiro) nao e
+    /// telefone, mesmo somando 10+ digitos e tendo 4 grupos.
+    #[test]
+    fn numero_com_separador_de_milhar_nao_e_mascarado() {
+        assert_eq!(
+            mascarar_numeros_longos("total 1 234 567 890 reais"),
+            "total 1 234 567 890 reais"
+        );
+    }
+
+    /// #1514, achado da revisao de codigo: `parece_data` cobre `DD-MM-AAAA`
+    /// e `DD-MM-AA` alem de `AAAA-MM-DD`, do jeito que um usuario BR escreve
+    /// data em texto livre — nao so a convencao de data narrativa do
+    /// `CLAUDE.md`.
+    #[test]
+    fn data_dd_mm_aaaa_seguida_de_numero_curto_nao_e_mascarada() {
+        assert_eq!(
+            mascarar_numeros_longos("reuniao em 22-09-2026 05 min"),
+            "reuniao em 22-09-2026 05 min"
+        );
+    }
+
+    /// #1514, achado MEDIO da auditoria de seguranca: o guarda de data so
+    /// protege quando o que vem depois **nao** completaria um telefone
+    /// plausivel. Um numero real que por acaso comeca com a forma de uma
+    /// data (`"5511-98-76-5432"`, grupos 4-2-2 seguidos de um grupo de 4)
+    /// nao pode escapar so por isso.
+    #[test]
+    fn numero_real_com_prefixo_de_data_nao_escapa_a_mascara() {
+        assert_eq!(
+            mascarar_numeros_longos("callback 5511-98-76-5432 recebido"),
+            "callback \u{2026}5432 recebido"
+        );
+    }
+
+    /// #1514, achado da segunda rodada da auditoria de seguranca: espiar so
+    /// o proximo grupo nao bastava para desfazer a ambiguidade com data —
+    /// com DDI separado, o grupo logo apos a forma de data ainda e curto
+    /// (`"76"`), e so o **seguinte** (`"5432"`) prova que era telefone.
+    #[test]
+    fn numero_real_com_ddi_separado_e_prefixo_de_data_nao_escapa() {
+        assert_eq!(
+            mascarar_numeros_longos("callback 55-11-98-76-5432 recebido"),
+            "callback \u{2026}5432 recebido"
+        );
+    }
+
+    /// #1514, regressao achada na segunda rodada da auditoria de seguranca:
+    /// `parece_numero_com_milhar` checado a cada grupo novo (em vez de so no
+    /// final) apagava todo celular NANP com DDI separado, porque o prefixo
+    /// `[1,3,3]` e igual ao de um numero de verdade com separador de milhar
+    /// — so o ultimo grupo (`4567`, 4 digitos, nao 3) desfaz a ambiguidade.
+    #[test]
+    fn celular_nanp_com_ddi_separado_nao_e_confundido_com_numero_de_milhar() {
+        let casos = [
+            "ligue +1 555 123 4567 agora",
+            "ligue +1 (555) 123-4567 agora",
+            "ligue +1-555-123-4567 agora",
+            "ligue 1 555 123 4567 agora",
+        ];
+        for entrada in casos {
+            let saida = mascarar_numeros_longos(entrada);
+            assert!(
+                saida.ends_with("\u{2026}4567 agora"),
+                "{entrada} -> {saida}"
+            );
+        }
+    }
+
+    /// Guarda contra falso positivo: um id curto colado a letra na frente de
+    /// um telefone de verdade (`"req5-<telefone>"`) nao pode arrastar o
+    /// telefone para a rejeicao do id. So o id fica de fora da mascara.
+    #[test]
+    fn id_colado_a_letra_na_frente_nao_esconde_o_telefone_depois() {
+        assert_eq!(
+            mascarar_numeros_longos("req5-5511987654321 chegou"),
+            "req5-\u{2026}4321 chegou"
+        );
+    }
+
+    /// Guarda simetrica: um digito solto colado a letra **depois** de um
+    /// telefone de verdade (`"...-9abc"`) nao pode arrastar o telefone para
+    /// a rejeicao por `colado_depois`.
+    #[test]
+    fn digito_colado_a_letra_atras_nao_esconde_o_telefone_antes() {
+        assert_eq!(
+            mascarar_numeros_longos("liga pra 5511987654321-9abc"),
+            "liga pra \u{2026}4321-9abc"
+        );
+    }
+
+    /// Guarda contra falso positivo: uma data narrativa `AAAA-MM-DD` (a forma
+    /// que o `CLAUDE.md` manda usar) seguida de outro numero curto separado
+    /// por espaco nao pode juntar digitos ate estourar o limiar. Sem o guarda
+    /// de data, `2026-09-22 05` soma exatamente 10 digitos.
+    #[test]
+    fn data_narrativa_seguida_de_numero_curto_nao_e_mascarada() {
+        assert_eq!(
+            mascarar_numeros_longos("log em 2026-09-22 05 registros processados"),
+            "log em 2026-09-22 05 registros processados"
+        );
+    }
+
+    /// Guarda contra falso positivo: uma lista de numeros curtos separados
+    /// por espaco (comum em texto solto) nao pode acumular digitos por conta
+    /// do teto de grupos adicionais da ponte.
+    #[test]
+    fn lista_de_numeros_curtos_separados_por_espaco_nao_e_mascarada() {
+        assert_eq!(
+            mascarar_numeros_longos("portas 1 2 3 4 5 6 7 8 9 10 liberadas"),
+            "portas 1 2 3 4 5 6 7 8 9 10 liberadas"
+        );
+    }
+
+    /// Timestamp ISO 8601 com `T` (o formato que o `CLAUDE.md` manda para log
+    /// e audit) nao pode virar telefone: o `T` colado a letra ja bloqueia a
+    /// ponte antes de ela alcancar o limiar, sem precisar do guarda de data.
+    #[test]
+    fn timestamp_iso_com_t_nao_e_mascarado() {
+        assert_eq!(
+            mascarar_numeros_longos("em 2026-09-22T05:44:36.123456789Z ocorreu"),
+            "em 2026-09-22T05:44:36.123456789Z ocorreu"
+        );
     }
 
     #[test]
