@@ -163,6 +163,16 @@ impl ManipuladorMcpHttp {
     /// o chamador declara em `canais_dos_turnos`, e uma leitura por MCP nao e
     /// um turno de canal nenhum: passar um nome aqui contaminaria o dado que o
     /// `garra_status` consulta para decidir o que retem do operador.
+    ///
+    /// **A sessao inventada e desfeita.** `hydrate_session_history` CRIA a
+    /// sessao em memoria quando ela nao existe — o que e o certo para os
+    /// caminhos que o chamam (um turno esta comecando ali), e errado aqui: um
+    /// `chat` qualquer numa leitura faria o `DashMap` de sessoes crescer por
+    /// pedido, e cada id inventado apareceria no `garra_list_chats` como se
+    /// fosse conversa. O rate limit por IP reduz a velocidade disso, nao o teto.
+    /// Entao: se a sessao nao existia antes e a hidratacao nao trouxe mensagem
+    /// nenhuma, a entrada sai. Conversa de verdade (em memoria ou no
+    /// `sessions.db`) nunca cai nesse ramo.
     async fn read_history(
         &self,
         state: &Arc<AppState>,
@@ -170,8 +180,12 @@ impl ManipuladorMcpHttp {
         args: &ArgsReadHistory,
     ) -> JsonValue {
         let chat = args.chat.trim();
+        let existia = state.sessions.contains_key(chat);
         state.hydrate_session_history(chat, None, None).await;
         let historico = state.session_history(chat);
+        if !existia && historico.is_empty() {
+            state.sessions.remove(chat);
+        }
         let limite = politica.limite_do_historico(args.limit);
         let inicio = historico.len().saturating_sub(limite);
         let mensagens: Vec<JsonValue> = crate::api::mensagens_em_json(&historico[inicio..])

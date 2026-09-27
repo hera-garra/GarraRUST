@@ -107,6 +107,14 @@ fn config_de(l: Ligacao) -> AppConfig {
 /// de qualquer camada de auth — o mesmo comentario de `api_key_gate.rs` e
 /// `origin_guard_layering.rs`.
 async fn post_mcp(l: Ligacao, bearer: Option<&str>, corpo: Value) -> Response<Body> {
+    let (router, _state) = router_e_state(l);
+    pedir(router, bearer, corpo).await
+}
+
+/// O router e o `AppState` que ele carrega, para os testes que precisam olhar o
+/// estado **depois** de mais de um pedido. O `post_mcp` acima descarta o state
+/// porque a maioria dos casos so olha a resposta.
+fn router_e_state(l: Ligacao) -> (axum::Router, Arc<AppState>) {
     let state = Arc::new(AppState::new(
         config_de(l),
         Arc::new(AgentRuntime::new()),
@@ -116,12 +124,15 @@ async fn post_mcp(l: Ligacao, bearer: Option<&str>, corpo: Value) -> Response<Bo
         AdminStore::in_memory().expect("in-memory admin store"),
     ));
     let router = build_router(
-        state,
+        Arc::clone(&state),
         PushChannelStates::empty(),
         admin_store,
         Arc::new(vec![0u8; 32]),
     );
+    (router, state)
+}
 
+async fn pedir(router: axum::Router, bearer: Option<&str>, corpo: Value) -> Response<Body> {
     let mut builder = Request::builder()
         .method("POST")
         .uri("/mcp")
@@ -347,6 +358,106 @@ async fn tools_call_read_history_declara_a_redacao() {
     assert_eq!(env["ok"], true, "{env}");
     assert_eq!(env["redacted"], true, "{env}");
     assert_eq!(env["messages"], json!([]), "{env}");
+}
+
+/// Ler o historico de um `chat` que nao existe **nao cria** conversa.
+///
+/// `hydrate_session_history` cria a sessao em memoria quando ela falta, o que e
+/// certo para os caminhos que abrem um turno e errado numa leitura vinda de
+/// fora: cada id inventado passaria a ocupar espaco no `DashMap` de sessoes e a
+/// aparecer no `garra_list_chats` como se fosse conversa. O rate limit por IP
+/// atrasa isso; nao poe teto.
+///
+/// Os dois pedidos correm contra o MESMO `AppState`, senao o teste nao veria o
+/// crescimento que ele existe para negar.
+#[tokio::test]
+async fn ler_historico_de_chat_inexistente_nao_cria_sessao() {
+    let (router, state) = router_e_state(Ligacao::leitura());
+    for inventado in ["nao-existe-1", "nao-existe-2"] {
+        let resp = pedir(
+            router.clone(),
+            Some(BEARER),
+            rpc(
+                3,
+                "tools/call",
+                json!({
+                    "name": "garra_read_history",
+                    "arguments": { "chat": inventado }
+                }),
+            ),
+        )
+        .await;
+        let env = envelope(&corpo_json(resp).await);
+        assert_eq!(env["ok"], true, "{env}");
+        assert_eq!(env["messages"], json!([]), "{env}");
+    }
+    assert_eq!(
+        state.sessions.len(),
+        0,
+        "leitura de chat inexistente deixou sessao para tras: {:?}",
+        state
+            .sessions
+            .iter()
+            .map(|e| e.id.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // E o `garra_list_chats` nao passa a listar os ids inventados.
+    let lista = envelope(
+        &corpo_json(
+            pedir(
+                router,
+                Some(BEARER),
+                rpc(
+                    4,
+                    "tools/call",
+                    json!({ "name": "garra_list_chats", "arguments": {} }),
+                ),
+            )
+            .await,
+        )
+        .await,
+    );
+    assert_eq!(lista["chats"], json!([]), "{lista}");
+}
+
+/// A contraparte: uma conversa que existe de verdade **e** lida, e a limpeza
+/// acima nao a remove. Sem este par, "nao cria sessao" poderia ser satisfeito
+/// por um `read_history` que nunca le nada.
+#[tokio::test]
+async fn ler_historico_de_chat_que_existe_devolve_a_conversa_e_a_preserva() {
+    let (router, state) = router_e_state(Ligacao::leitura());
+    // Como o web chat grava antes de um turno.
+    state
+        .hydrate_session_history("conversa-de-verdade", Some("web"), None)
+        .await;
+    assert_eq!(state.sessions.len(), 1);
+
+    let env = envelope(
+        &corpo_json(
+            pedir(
+                router,
+                Some(BEARER),
+                rpc(
+                    3,
+                    "tools/call",
+                    json!({
+                        "name": "garra_read_history",
+                        "arguments": { "chat": "conversa-de-verdade" }
+                    }),
+                ),
+            )
+            .await,
+        )
+        .await,
+    );
+    assert_eq!(env["ok"], true, "{env}");
+    assert_eq!(env["chat"], "conversa-de-verdade", "{env}");
+    assert_eq!(
+        state.sessions.len(),
+        1,
+        "a limpeza removeu uma sessao que existia antes do pedido"
+    );
 }
 
 /// Argumento invalido e erro de **protocolo** (bug do chamador), nao resultado
