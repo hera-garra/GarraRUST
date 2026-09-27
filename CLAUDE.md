@@ -26,7 +26,9 @@ respeitar.
 
 ```text
 crates/
-  garraia-cli/        — binário "garraia" (clap): wizard, chat interativo, `config check`
+  garraia-cli/        — binário "garra" (o crate é `garraia`, o `[[bin]]` é `garra` —
+                        `crates/garraia-cli/Cargo.toml:10`; clap idem): wizard,
+                        chat interativo, `config check`
                         (plan 0035; exit codes sysexits 0/2/65), `migrate workspace
                         --from-sqlite --to-postgres` (plans 0039/0040/0045: users +
                         identities + groups + chats, audit atômico in-tx; stages 6+
@@ -78,8 +80,8 @@ crates/
                         `ObjectStore` em `AppState` via `StorageConfig`, commit two-phase
                         blob-first (plan 0044 §5.3.1), cap `storage.max_patch_bytes`
                         default 100 MiB, worker de expiração em `uploads_worker.rs`.
-                        CI (`.github/workflows/ci.yml`): o binário é `garraia`
-                        (`cargo build --bin garraia --release`; `garraia-gateway` é lib);
+                        CI (`.github/workflows/ci.yml`): o binário é `garra`
+                        (`cargo build --bin garra --release`; `garraia-gateway` é lib);
                         zero `continue-on-error` ativo (higiene #1094). Specs Playwright
                         do admin DEVEM usar `data-testid` estáveis (contrato de teste),
                         não `placeholder*=` nem `getByRole(button,{name})` (plan 0052).
@@ -107,7 +109,7 @@ crates/
   garraia-security/   — CredentialVault (AES-256-GCM), PBKDF2, RedactingWriter
   garraia-config/     — schema unificado de config (serde + validator + notify). Módulo
                         `check` (`run_check` + `ConfigCheck`/`Finding`/`Severity`/
-                        `SourceReport`) alimenta `garraia config check [--json] [--strict]`.
+                        `SourceReport`) alimenta `garra config check [--json] [--strict]`.
                         `StorageConfig` + `StorageBackend` (`local` | `s3`) + `LocalFsConfig`
                         + `S3Config` com validações (staging_dir gravável, faixa de
                         `max_patch_bytes`, endpoint S3, MIME allow-list override via
