@@ -26,7 +26,17 @@ respeitar.
 
 ```text
 crates/
-  garraia-cli/        — binário "garraia" (clap): wizard, chat interativo, `config check`
+  garraia-cli/        — **Dois nomes, ambos certos, cada um no seu contexto** — não
+                        "consertar" um para casar com o outro: o **alvo de cargo** é
+                        `garra` (`[[bin]]` em `crates/garraia-cli/Cargo.toml:10`, e o
+                        clap idem), então é `cargo build --bin garra`; o **pacote** é
+                        `garraia`; e o **asset de release / binário instalado** é
+                        `garraia` (`install.sh:86`), com `garra` chegando como symlink
+                        relativo ao lado dele (`install_garra_alias`, #1328; no Windows
+                        o shim `garra.cmd`). Numa instalação os dois comandos funcionam,
+                        e é por isso que `garraia config check` nos docs e `garra config
+                        check` no `docs/execution-profiles.md` estão os dois corretos.
+                        Wizard, chat interativo, `config check`
                         (plan 0035; exit codes sysexits 0/2/65), `migrate workspace
                         --from-sqlite --to-postgres` (plans 0039/0040/0045: users +
                         identities + groups + chats, audit atômico in-tx; stages 6+
@@ -78,8 +88,8 @@ crates/
                         `ObjectStore` em `AppState` via `StorageConfig`, commit two-phase
                         blob-first (plan 0044 §5.3.1), cap `storage.max_patch_bytes`
                         default 100 MiB, worker de expiração em `uploads_worker.rs`.
-                        CI (`.github/workflows/ci.yml`): o binário é `garraia`
-                        (`cargo build --bin garraia --release`; `garraia-gateway` é lib);
+                        CI (`.github/workflows/ci.yml`): o binário é `garra`
+                        (`cargo build --bin garra --release`; `garraia-gateway` é lib);
                         zero `continue-on-error` ativo (higiene #1094). Specs Playwright
                         do admin DEVEM usar `data-testid` estáveis (contrato de teste),
                         não `placeholder*=` nem `getByRole(button,{name})` (plan 0052).
