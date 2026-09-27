@@ -183,8 +183,13 @@ impl ManipuladorMcpHttp {
         let existia = state.sessions.contains_key(chat);
         state.hydrate_session_history(chat, None, None).await;
         let historico = state.session_history(chat);
-        if !existia && historico.is_empty() {
-            state.sessions.remove(chat);
+        if !existia {
+            // `remove_if` e nao `remove`: entre a hidratacao e a limpeza cabe um
+            // turno de verdade nascendo com este mesmo id, e um `remove` cego
+            // apagaria a sessao viva que ele acabou de criar. O predicado corre
+            // dentro do shard, ja com o valor em maos, entao a decisao "esta
+            // vazia" e a remocao sao o mesmo passo.
+            state.sessions.remove_if(chat, |_, s| s.history.is_empty());
         }
         let limite = politica.limite_do_historico(args.limit);
         let inicio = historico.len().saturating_sub(limite);
@@ -328,11 +333,28 @@ impl ManipuladorMcpHttp {
                     "delivered": true,
                 }))
             }
-            Err(e) => Err(json!({
-                "schema": SCHEMA,
-                "ok": false,
-                "error": { "kind": "delivery_failed", "message": e.to_string() },
-            })),
+            Err(e) => {
+                // O detalhe do canal fica no log, nao na resposta. E texto
+                // arbitrario de um servico externo: hoje o teloxide mascara o
+                // token do bot antes de formatar o erro de rede, mas isso e
+                // garantia de UMA dependencia, e cada canal novo traz o proprio
+                // formato. Devolver codigo estavel e a escolha que nao depende
+                // de quem esta do outro lado se comportar.
+                tracing::warn!(
+                    canal = %args.channel,
+                    erro = %garraia_security::redact_secrets(&e.to_string()),
+                    "mcp_http: garra_send_message falhou na entrega"
+                );
+                Err(json!({
+                    "schema": SCHEMA,
+                    "ok": false,
+                    "error": {
+                        "kind": "delivery_failed",
+                        "message": "o canal aceitou o pedido e a entrega falhou. \
+                                    O motivo esta no log do gateway.",
+                    },
+                }))
+            }
         }
     }
 

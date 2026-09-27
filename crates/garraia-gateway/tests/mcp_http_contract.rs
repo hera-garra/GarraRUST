@@ -646,3 +646,95 @@ async fn nenhuma_recusa_ecoa_o_destino() {
         );
     }
 }
+
+/// O marcador que nao pode aparecer na resposta. E propositalmente impossivel de
+/// confundir com credencial de verdade (pontos e maiusculas fora do alfabeto de
+/// qualquer token conhecido) — o que importa e que ele venha do erro do canal.
+const MARCADOR_DO_ERRO: &str = "MARCADOR.QUE.NAO.PODE.SAIR.do-teste";
+
+/// Um canal que sempre falha a entrega, para alcancar o unico ramo que os testes
+/// acima nao alcancam: `delivery_failed`. O erro imita o formato que um canal
+/// real produz — uma URL de servico externo, com o destino no query string.
+struct CanalQueFalha;
+
+#[async_trait::async_trait]
+impl garraia_channels::Channel for CanalQueFalha {
+    fn channel_type(&self) -> &str {
+        "telegram"
+    }
+    fn display_name(&self) -> &str {
+        "Telegram (falso)"
+    }
+    async fn connect(&mut self) -> garraia_common::Result<()> {
+        Ok(())
+    }
+    async fn disconnect(&mut self) -> garraia_common::Result<()> {
+        Ok(())
+    }
+    async fn send_message(&self, _message: &garraia_common::Message) -> garraia_common::Result<()> {
+        Err(garraia_common::Error::Channel(format!(
+            "telegram send failed: A network error: error sending request for url \
+             (https://api.telegram.org/bot{MARCADOR_DO_ERRO}/sendMessage?chat_id={DESTINO})"
+        )))
+    }
+    fn status(&self) -> garraia_channels::ChannelStatus {
+        garraia_channels::ChannelStatus::Connected
+    }
+}
+
+/// A falha de **entrega** tambem nao ecoa o erro do canal.
+///
+/// Este e o ramo que `nenhuma_recusa_ecoa_o_destino` nao alcanca: la o canal nem
+/// esta registrado, entao a recusa para em `channel_offline`. Aqui o portao abre
+/// de verdade, a tool chama o canal, e o canal falha — e e nesse ponto que a
+/// tentacao de devolver `e.to_string()` aparece. O texto do erro e de um servico
+/// externo: hoje o teloxide mascara o token do bot, mas isso e garantia de UMA
+/// dependencia, e cada canal novo traz o proprio formato. O chamador recebe
+/// codigo estavel; o motivo fica no log do dono.
+#[tokio::test]
+async fn falha_de_entrega_nao_ecoa_o_erro_do_canal() {
+    let (router, state) = router_e_state(Ligacao::leitura().com(true, true));
+    state
+        .channels
+        .write()
+        .await
+        .register(Box::new(CanalQueFalha));
+
+    let env = envelope(
+        &corpo_json(
+            pedir(
+                router,
+                Some(BEARER),
+                rpc(
+                    3,
+                    "tools/call",
+                    json!({
+                        "name": "garra_send_message",
+                        "arguments": { "channel": "telegram", "chat_id": DESTINO, "text": "oi" }
+                    }),
+                ),
+            )
+            .await,
+        )
+        .await,
+    );
+
+    assert_eq!(env["ok"], false, "{env}");
+    assert_eq!(
+        env["error"]["kind"], "delivery_failed",
+        "o portao nao abriu, entao este teste nao esta provando o que diz: {env}"
+    );
+    let texto = env.to_string();
+    assert!(
+        !texto.contains(MARCADOR_DO_ERRO),
+        "a resposta ecoou o erro do canal, com credencial dentro: {texto}"
+    );
+    assert!(
+        !texto.contains(&DESTINO.to_string()),
+        "a resposta ecoou o destino pela via do erro do canal: {texto}"
+    );
+    assert!(
+        !texto.contains("api.telegram.org"),
+        "a resposta ecoou a URL do servico externo: {texto}"
+    );
+}

@@ -177,7 +177,10 @@ Refusals carry a stable `error.kind` so the caller can distinguish causes withou
 parsing prose: `send_disabled`, `no_allowlist`, `target_not_allowed`,
 `channel_unsupported`, `rate_limited`, `channel_offline`, `delivery_failed`.
 None of them echoes the requested `chat_id` — a refused destination is still a
-real person's conversation, and the response leaves the machine.
+real person's conversation, and the response leaves the machine. `delivery_failed`
+also does not forward the channel's own error text: that string comes from an
+external service in a format the bridge does not control, so the reason goes to
+the gateway log and the caller gets the stable code.
 
 ## 5. Where the code lives
 
