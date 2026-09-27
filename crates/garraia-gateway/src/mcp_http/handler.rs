@@ -1,0 +1,453 @@
+//! O `ServerHandler` da ponte: onde as decisoes de [`super::politica`] encontram
+//! o `AppState`.
+//!
+//! Molde: `crates/garraia-cli/src/mcp_server.rs`, que ja implementa
+//! `rmcp::ServerHandler` para o servidor stdio (`garra mcp-server`, tool
+//! `garra_ask`) e diz no proprio cabecalho "Stdio transport only. No HTTP /
+//! Streamable HTTP in this PR". Este arquivo e a continuacao declarada daquele
+//! trabalho, do outro lado do transporte — e por isso repete de proposito as
+//! escolhas dele: despachante puro, envelope JSON inteiro como conteudo de
+//! texto, e a superficie anunciada resolvida por uma politica em vez de um
+//! `if` espalhado pelo `call_tool`.
+//!
+//! ## O que este handler NAO faz
+//!
+//! - **Nao chama o LLM.** `garra_ask` continua sendo do servidor stdio, como a
+//!   spec da #1513 pede ("nao migrar, reutilizar"). Uma ponte que gastasse a
+//!   chave de LLM do dono a pedido de um orquestrador externo e uma decisao
+//!   diferente, e nao e esta.
+//! - **Nao registra tool no `AgentRuntime`.** A direcao aqui e de fora para
+//!   dentro; o caminho de dentro para fora e o `McpManager`, em
+//!   `crate::mcp`.
+//! - **Nao decide autenticacao.** Quem exige o `gateway.api_key` e o
+//!   `api_key_layer` do router, por fora — ver [`super::build_mcp_http_routes`].
+
+use std::sync::{Arc, Weak};
+
+use rmcp::ErrorData as McpError;
+use rmcp::model::{
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
+    PaginatedRequestParams, ServerCapabilities, ServerInfo,
+};
+use rmcp::service::RequestContext;
+use rmcp::{RoleServer, ServerHandler};
+use serde_json::{Value as JsonValue, json};
+
+use super::ferramentas::{
+    self, ArgsListChats, ArgsReadHistory, ArgsSendMessage, TOOL_LIST_CHATS, TOOL_PAIR_STATUS,
+    TOOL_READ_HISTORY, TOOL_SEND_MESSAGE, TOOL_STATUS,
+};
+use super::politica::{PoliticaMcpHttp, SESSAO_DO_TETO};
+use crate::channel_send::{SendBudget, with_channel_address};
+use crate::push_channels::PushMounted;
+use crate::state::AppState;
+
+/// O schema do envelope de resposta, versionado como o `garra.ask.v1` do
+/// servidor stdio. Versionar desde a primeira versao e o que permite mudar o
+/// corpo depois sem quebrar quem leu a primeira.
+const SCHEMA: &str = "garra.mcp.v1";
+
+/// O handler de uma sessao MCP.
+///
+/// Uma instancia por sessao (o `service_factory` do
+/// `StreamableHttpService` chama o construtor a cada `initialize`), e por isso o
+/// teto de envios chega de fora, em `Arc`: um orcamento criado por sessao seria
+/// um orcamento que o chamador zera abrindo outra sessao.
+#[derive(Clone)]
+pub struct ManipuladorMcpHttp {
+    /// **Weak** pelo mesmo motivo do `TelegramSendTool`: o `AppState` vive mais
+    /// que qualquer sessao MCP, e um `Arc` daqui para la fecharia um ciclo que
+    /// so nao vaza porque nada nunca e dropado.
+    state: Weak<AppState>,
+    /// Quantos canais push subiram — o mesmo dado que o `/api/channels` usa
+    /// para nao chamar de "offline" um canal que nem entra no registry.
+    push: PushMounted,
+    /// Anti-amplificacao dos envios, compartilhado por todas as sessoes.
+    orcamento: Arc<SendBudget>,
+}
+
+impl ManipuladorMcpHttp {
+    pub fn novo(state: &Arc<AppState>, push: PushMounted, orcamento: Arc<SendBudget>) -> Self {
+        Self {
+            state: Arc::downgrade(state),
+            push,
+            orcamento,
+        }
+    }
+
+    /// A politica de agora, ou `None` se o gateway ja esta indo embora.
+    fn politica(&self) -> Option<(Arc<AppState>, PoliticaMcpHttp)> {
+        let state = self.state.upgrade()?;
+        let politica = PoliticaMcpHttp::da_config(&state.current_config());
+        Some((state, politica))
+    }
+
+    /// `garra_status`.
+    async fn status(&self, state: &Arc<AppState>, politica: &PoliticaMcpHttp) -> JsonValue {
+        let canais = crate::channels_view::channel_rows(state, self.push).await;
+        json!({
+            "schema": SCHEMA,
+            "ok": true,
+            "version": env!("CARGO_PKG_VERSION"),
+            "uptime_secs": state.boot_time.elapsed().as_secs(),
+            "chats_in_memory": state.sessions.len(),
+            "channels": canais
+                .iter()
+                .map(|c| json!({
+                    "id": c.id,
+                    "status": c.status,
+                    "needs_secret": c.needs_secret,
+                }))
+                .collect::<Vec<_>>(),
+            // O que a ponte pode fazer, dito pela propria ponte: e assim que o
+            // orquestrador descobre que o envio esta desligado sem ter de
+            // tentar um envio para descobrir.
+            "mcp_http": {
+                "send_enabled": politica.anuncia_envio(),
+                "allowed_targets": politica.destinos_liberados(),
+            },
+        })
+    }
+
+    /// `garra_list_chats`.
+    ///
+    /// Le so o que esta em memoria — o mesmo recorte do `GET /api/sessions`.
+    /// Uma varredura do `sessions.db` seria outra consulta e outro custo, e o
+    /// caso de uso ("com o que este Garra esta lidando agora") e satisfeito
+    /// pelo que esta vivo.
+    fn list_chats(&self, state: &Arc<AppState>, args: &ArgsListChats) -> JsonValue {
+        let filtro = args
+            .channel
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty());
+        let mut chats: Vec<JsonValue> = state
+            .sessions
+            .iter()
+            .filter(|entrada| match filtro {
+                None => true,
+                Some(canal) => {
+                    entrada.channel_id.as_deref() == Some(canal)
+                        || entrada.canais_dos_turnos.iter().any(|c| c == canal)
+                }
+            })
+            .map(|entrada| {
+                json!({
+                    "chat": entrada.id.clone(),
+                    "channel": entrada.channel_id.clone(),
+                    "channels_seen": entrada.canais_dos_turnos.iter().cloned().collect::<Vec<_>>(),
+                    "messages": entrada.history.len(),
+                    "connected": entrada.connected,
+                    "idle_secs": entrada.last_active.elapsed().as_secs(),
+                })
+            })
+            .collect();
+        // Ordem estavel: o `DashMap` nao tem ordem, e um `tools/list` de chats
+        // que muda de ordem a cada chamada faz o modelo do outro lado achar que
+        // a lista mudou.
+        chats.sort_by(|a, b| a["chat"].as_str().cmp(&b["chat"].as_str()));
+        json!({
+            "schema": SCHEMA,
+            "ok": true,
+            "chats": chats,
+        })
+    }
+
+    /// `garra_read_history`.
+    ///
+    /// Hidrata a sessao antes de ler, como o `GET /api/sessions/{id}/history`
+    /// faz: sem isso uma conversa que existe no `sessions.db` mas nao esta em
+    /// memoria voltaria vazia, e "vazia" e indistinguivel de "nao existe".
+    ///
+    /// **Sem `channel_id`.** O `hydrate_session_history` grava a superficie que
+    /// o chamador declara em `canais_dos_turnos`, e uma leitura por MCP nao e
+    /// um turno de canal nenhum: passar um nome aqui contaminaria o dado que o
+    /// `garra_status` consulta para decidir o que retem do operador.
+    async fn read_history(
+        &self,
+        state: &Arc<AppState>,
+        politica: &PoliticaMcpHttp,
+        args: &ArgsReadHistory,
+    ) -> JsonValue {
+        let chat = args.chat.trim();
+        state.hydrate_session_history(chat, None, None).await;
+        let historico = state.session_history(chat);
+        let limite = politica.limite_do_historico(args.limit);
+        let inicio = historico.len().saturating_sub(limite);
+        let mensagens: Vec<JsonValue> = crate::api::mensagens_em_json(&historico[inicio..])
+            .into_iter()
+            .map(|mut m| {
+                // A redacao e a mesma do log (`garraia_security::redact_secrets`):
+                // um token que o usuario colou numa conversa nao viaja para um
+                // orquestrador externo so porque virou historico.
+                if let Some(texto) = m["content"].as_str() {
+                    m["content"] = json!(garraia_security::redact_secrets(texto));
+                }
+                m
+            })
+            .collect();
+        json!({
+            "schema": SCHEMA,
+            "ok": true,
+            "chat": chat,
+            "total_messages": historico.len(),
+            "returned": mensagens.len(),
+            "redacted": true,
+            "messages": mensagens,
+        })
+    }
+
+    /// `garra_pair_status`.
+    async fn pair_status(&self, state: &Arc<AppState>) -> JsonValue {
+        let canais = crate::channels_view::channel_rows(state, self.push).await;
+        // Lock envenenado devolve "desconhecido" em vez de derrubar um caminho
+        // de leitura — e a mesma escolha de `registry_commands_for_http`.
+        let (modo, dono) = match state.allowlist.lock() {
+            Ok(lista) => (
+                match lista.mode() {
+                    garraia_security::AllowlistMode::Open => "open",
+                    garraia_security::AllowlistMode::Restricted => "restricted",
+                },
+                lista.owner().is_some(),
+            ),
+            Err(_) => ("unknown", false),
+        };
+        json!({
+            "schema": SCHEMA,
+            "ok": true,
+            // Nunca o id do dono: a pergunta e "esta pareado?", nao "quem e".
+            "owner_claimed": dono,
+            "allowlist_mode": modo,
+            "channels": canais
+                .iter()
+                .map(|c| json!({
+                    "id": c.id,
+                    "display_name": c.display_name,
+                    "status": c.status,
+                    "awaiting_secret": c.needs_secret,
+                }))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    /// `garra_send_message` — o unico caminho de escrita desta ponte.
+    ///
+    /// Ordem: politica, teto, entrega. O teto e cobrado **depois** de a politica
+    /// aprovar, pelo mesmo motivo do `telegram_send`: um envio recusado que
+    /// gastasse cota deixaria um chamador sondando destinos trancar o dono fora
+    /// das proprias notificacoes.
+    async fn send_message(
+        &self,
+        state: &Arc<AppState>,
+        politica: &PoliticaMcpHttp,
+        args: &ArgsSendMessage,
+    ) -> Result<JsonValue, JsonValue> {
+        if let Err(recusa) = politica.decidir_envio(&args.channel, args.chat_id) {
+            // `channel` entra no log (e um nome de canal, nao um destino);
+            // `chat_id` nao entra nunca.
+            tracing::warn!(
+                canal = %args.channel,
+                motivo = recusa.codigo(),
+                "mcp_http: garra_send_message recusado"
+            );
+            return Err(json!({
+                "schema": SCHEMA,
+                "ok": false,
+                "error": { "kind": recusa.codigo(), "message": recusa.explicacao() },
+            }));
+        }
+
+        if let Err(usados) = self
+            .orcamento
+            .try_consume(SESSAO_DO_TETO, std::time::Instant::now())
+        {
+            tracing::warn!(usados, "mcp_http: teto de envios da ponte atingido");
+            return Err(json!({
+                "schema": SCHEMA,
+                "ok": false,
+                "error": {
+                    "kind": "rate_limited",
+                    "message": format!(
+                        "limite de {usados} mensagens por minuto na ponte MCP atingido. \
+                         Junte o que falta dizer numa unica mensagem."
+                    ),
+                },
+            }));
+        }
+
+        let metadata =
+            with_channel_address(&json!({}), &args.channel, Some(&args.chat_id.to_string()));
+        let mensagem = garraia_common::Message {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: garraia_common::SessionId::from_string(SESSAO_DO_TETO),
+            channel_id: garraia_common::ChannelId::from_string(&args.channel),
+            user_id: garraia_common::UserId::from_string("genesis"),
+            direction: garraia_common::MessageDirection::Outgoing,
+            content: garraia_common::MessageContent::Text(args.text.clone()),
+            timestamp: chrono::Utc::now(),
+            metadata,
+        };
+
+        let canais = state.channels.read().await;
+        let Some(canal) = canais.get(args.channel.as_str()) else {
+            return Err(json!({
+                "schema": SCHEMA,
+                "ok": false,
+                "error": {
+                    "kind": "channel_offline",
+                    "message": "o canal esta liberado na config, mas nao esta registrado \
+                                neste gateway agora. Veja `garra_status`.",
+                },
+            }));
+        };
+        match canal.send_message(&mensagem).await {
+            Ok(()) => {
+                tracing::info!(
+                    canal = %args.channel,
+                    chars = args.text.chars().count(),
+                    "mcp_http: garra_send_message entregue"
+                );
+                Ok(json!({
+                    "schema": SCHEMA,
+                    "ok": true,
+                    "channel": args.channel,
+                    "delivered": true,
+                }))
+            }
+            Err(e) => Err(json!({
+                "schema": SCHEMA,
+                "ok": false,
+                "error": { "kind": "delivery_failed", "message": e.to_string() },
+            })),
+        }
+    }
+
+    /// Despacho puro de nome para resultado, para o `call_tool` ficar com uma
+    /// forma so: `Ok(valor)` = sucesso, `Err(valor)` = envelope de erro.
+    ///
+    /// `Err` aqui **nao** e erro de protocolo: e um `CallToolResult::error`, que
+    /// o modelo do outro lado le e pode agir sobre. Erro de protocolo
+    /// (`McpError`) fica para argumento malformado e tool inexistente, que sao
+    /// bug do chamador e nao resultado.
+    async fn despachar(
+        &self,
+        nome: &str,
+        argumentos: JsonValue,
+    ) -> Result<Result<JsonValue, JsonValue>, McpError> {
+        let Some((state, politica)) = self.politica() else {
+            return Err(McpError::internal_error("gateway encerrando", None));
+        };
+
+        match nome {
+            TOOL_STATUS => {
+                exigir_sem_argumentos(nome, &argumentos)?;
+                Ok(Ok(self.status(&state, &politica).await))
+            }
+            TOOL_PAIR_STATUS => {
+                exigir_sem_argumentos(nome, &argumentos)?;
+                Ok(Ok(self.pair_status(&state).await))
+            }
+            TOOL_LIST_CHATS => {
+                let args: ArgsListChats = desserializar(argumentos)?;
+                Ok(Ok(self.list_chats(&state, &args)))
+            }
+            TOOL_READ_HISTORY => {
+                let args: ArgsReadHistory = desserializar(argumentos)?;
+                ferramentas::validar_read_history(&args)
+                    .map_err(|e| McpError::invalid_params(e, None))?;
+                Ok(Ok(self.read_history(&state, &politica, &args).await))
+            }
+            TOOL_SEND_MESSAGE => {
+                let args: ArgsSendMessage = desserializar(argumentos)?;
+                ferramentas::validar_send_message(&args)
+                    .map_err(|e| McpError::invalid_params(e, None))?;
+                Ok(self.send_message(&state, &politica, &args).await)
+            }
+            outro => Err(McpError::invalid_params(
+                format!("tool desconhecida: '{outro}'"),
+                None,
+            )),
+        }
+    }
+}
+
+/// `tools/call` de uma tool sem argumento: um objeto vazio ou nada.
+///
+/// Recusar o resto e o que mantem o `additionalProperties: false` do schema
+/// valendo tambem onde nao existe `struct` para o serde recusar.
+fn exigir_sem_argumentos(nome: &str, argumentos: &JsonValue) -> Result<(), McpError> {
+    let vazio = match argumentos {
+        JsonValue::Object(m) => m.is_empty(),
+        JsonValue::Null => true,
+        _ => false,
+    };
+    if vazio {
+        Ok(())
+    } else {
+        Err(McpError::invalid_params(
+            format!("{nome} nao recebe argumentos"),
+            None,
+        ))
+    }
+}
+
+fn desserializar<T: serde::de::DeserializeOwned>(argumentos: JsonValue) -> Result<T, McpError> {
+    serde_json::from_value(argumentos)
+        .map_err(|e| McpError::invalid_params(format!("argumentos invalidos: {e}"), None))
+}
+
+impl ServerHandler for ManipuladorMcpHttp {
+    /// Anuncia a capability `tools` no `initialize`.
+    ///
+    /// Sem este override o `get_info` default do rmcp devolve `capabilities: {}`,
+    /// e o host le isso como "servidor sem tools" e nunca chama `tools/list` —
+    /// a pegadinha que a GAR-585 pagou uma vez no servidor stdio. Nenhuma outra
+    /// capability entra: esta ponte nao tem prompts, resources nem sampling.
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    }
+
+    async fn list_tools(
+        &self,
+        _: Option<PaginatedRequestParams>,
+        _: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        let politica = match self.politica() {
+            Some((_, p)) => p,
+            // Gateway indo embora: superficie vazia em vez de erro. Um
+            // `tools/list` durante o shutdown nao e falha do chamador.
+            None => return Ok(ListToolsResult::with_all_items(Vec::new())),
+        };
+        Ok(ListToolsResult::with_all_items(
+            ferramentas::tools_anunciadas(&politica),
+        ))
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
+        let argumentos = request
+            .arguments
+            .map(JsonValue::Object)
+            .unwrap_or(JsonValue::Null);
+        let resultado = self.despachar(&request.name, argumentos).await?;
+        let (valor, ok) = match resultado {
+            Ok(v) => (v, true),
+            Err(v) => (v, false),
+        };
+        let texto = serde_json::to_string(&valor).unwrap_or_else(|_| {
+            format!(
+                "{{\"schema\":\"{SCHEMA}\",\"ok\":false,\"error\":\
+                 {{\"kind\":\"io\",\"message\":\"json serialization failed\"}}}}"
+            )
+        });
+        let conteudo = vec![ContentBlock::text(texto)];
+        if ok {
+            Ok(CallToolResult::success(conteudo).into())
+        } else {
+            Ok(CallToolResult::error(conteudo).into())
+        }
+    }
+}

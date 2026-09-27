@@ -457,6 +457,17 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub allow_unauthenticated_network_bind: bool,
 
+    /// #1513: a ponte MCP Streamable HTTP em `POST /mcp`, para orquestrador
+    /// externo (Paperclip, Claude Code, qualquer host MCP que fale HTTP).
+    ///
+    /// Secao sob `gateway:` e nao sob o `mcp:` de topo de proposito: aquele e
+    /// um `HashMap<String, McpServerConfig>` dos servidores MCP que este
+    /// gateway **consome** como cliente, e uma chave `http` ali viraria um
+    /// servidor chamado "http". Esta e a direcao oposta — o gateway como
+    /// servidor — e e uma superficie HTTP dele.
+    #[serde(default)]
+    pub mcp_http: McpHttpConfig,
+
     /// #1261: a credencial vinda de `GARRAIA_GATEWAY_API_KEY`, aplicada por
     /// [`crate::ConfigLoader::load`].
     ///
@@ -526,9 +537,59 @@ impl Default for GatewayConfig {
             tls_cert_path: None,
             tls_key_path: None,
             allow_unauthenticated_network_bind: false,
+            mcp_http: McpHttpConfig::default(),
             api_key_env: None,
         }
     }
+}
+
+/// #1513 — a ponte MCP Streamable HTTP (`POST /mcp`).
+///
+/// **Tudo desligado por default, e nao e descuido.** Um endpoint MCP entrega a
+/// um orquestrador externo a lista de conversas do dono, o historico delas e —
+/// com `allow_send` — a capacidade de falar em nome dele num canal real. O
+/// operador liga isso explicitamente ou nao existe.
+///
+/// As duas chaves sao independentes por desenho: `enabled` sozinho da uma ponte
+/// **so de leitura**, que e o caso de uso comum (um orquestrador que consulta
+/// estado). Escrever exige a segunda chave *e* a allowlist de destinos por
+/// canal (`channels.<canal>.proactive_chat_ids`) — ver
+/// `garraia_gateway::mcp_http::politica`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpHttpConfig {
+    /// Monta `POST /mcp` no router. `false` (default) = a rota nao existe, e
+    /// um pedido nela cai no 404 do fallback como qualquer caminho invalido.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Destrava a tool `garra_send_message`. `false` (default) = a tool
+    /// **nao e anunciada** em `tools/list` e uma chamada direta a ela e
+    /// recusada — nao ha "desligada mas chamavel".
+    ///
+    /// Ligar isto **nao** basta para enviar: o destino ainda precisa estar em
+    /// `proactive_chat_ids` do canal. Um interruptor sem allowlist nao envia
+    /// nada, e e a forma de errar para o lado certo.
+    #[serde(default)]
+    pub allow_send: bool,
+
+    /// Teto de mensagens que `garra_read_history` devolve por chamada.
+    /// Tambem e o valor usado quando o chamador omite `limit`.
+    #[serde(default = "default_mcp_http_history_limit")]
+    pub max_history_messages: usize,
+}
+
+impl Default for McpHttpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allow_send: false,
+            max_history_messages: default_mcp_http_history_limit(),
+        }
+    }
+}
+
+fn default_mcp_http_history_limit() -> usize {
+    50
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

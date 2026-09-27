@@ -77,6 +77,22 @@ const PREFIXO: &str = "/api/";
 /// `/a2a/`, então fica de fora sem precisar de exceção.
 const PREFIXO_A2A: &str = "/a2a/";
 
+/// A ponte MCP Streamable HTTP (#1513), coberta por caminho exato **e** por
+/// prefixo — `POST /mcp` e o endpoint, e `/mcp/…` fica coberto de antemao para
+/// que um sub-caminho futuro nasca atras do gate.
+///
+/// Diferente das outras entradas desta lista, aqui o gate nao e a unica prova:
+/// `crate::mcp_http::decidir_montagem` **recusa montar a rota** sem
+/// `gateway.api_key`. Esta entrada e a segunda camada — ela e que faz um pedido
+/// sem bearer parar no 401 em vez de chegar ao `StreamableHttpService`.
+const PREFIXO_MCP: &str = "/mcp";
+
+/// `true` para `/mcp` e para qualquer coisa sob `/mcp/`, e `false` para
+/// `/mcporeia` — o prefixo nu casaria com essa terceira, que nao e da ponte.
+fn e_da_ponte_mcp(path: &str) -> bool {
+    path == PREFIXO_MCP || path.starts_with("/mcp/")
+}
+
 /// As rotas do plano de conversa que o gate cobre (#1240), por igualdade
 /// exata.
 ///
@@ -166,13 +182,14 @@ impl ApiKeyGate {
 
 /// `true` quando o caminho está atrás do gate.
 ///
-/// Três regras, nesta ordem de leitura: o Web Console menos a allowlist de
-/// descoberta, o conjunto nominal do plano de conversa, e o espaço de nomes
-/// do A2A por prefixo.
+/// Quatro regras, nesta ordem de leitura: o Web Console menos a allowlist de
+/// descoberta, o conjunto nominal do plano de conversa, o espaço de nomes
+/// do A2A por prefixo, e a ponte MCP (#1513).
 pub fn is_gated_path(path: &str) -> bool {
     (path.starts_with(PREFIXO) && !ROTAS_ABERTAS.contains(&path))
         || ROTAS_DE_CONVERSA.contains(&path)
         || path.starts_with(PREFIXO_A2A)
+        || e_da_ponte_mcp(path)
 }
 
 /// `true` quando algum dos headers que aquele caminho aceita traz a chave.
@@ -248,6 +265,8 @@ mod tests {
             .route("/v1/messages", get(|| async { "anthropic" }))
             .route("/v1/messages/count_tokens", get(|| async { "tokens" }))
             .route("/a2a/tasks", get(|| async { "a2a" }))
+            .route("/mcp", get(|| async { "ponte" }))
+            .route("/mcporeia", get(|| async { "homonimo" }))
             .route("/ws", get(|| async { "socket" }))
             .route("/health", get(|| async { "raiz" }))
             .fallback(|| async { StatusCode::NOT_FOUND.into_response() })
@@ -375,6 +394,30 @@ mod tests {
             resp.headers().get(header::WWW_AUTHENTICATE).unwrap(),
             r#"Bearer realm="garraia""#
         );
+    }
+
+    /// #1513 — a ponte MCP esta atras do gate, e o criterio 1 da issue e
+    /// exatamente isto: `/mcp` sem a chave e 401, com a chave passa.
+    #[tokio::test]
+    async fn a_ponte_mcp_exige_a_chave() {
+        assert_eq!(
+            status(Some("k1"), get_em("/mcp")).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status(Some("k1"), get_com_auth("/mcp", "Bearer k1")).await,
+            StatusCode::OK
+        );
+    }
+
+    /// O prefixo e ancorado: `/mcp/…` esta coberto, `/mcporeia` nao e da ponte
+    /// e nao herda o gate por acidente de prefixo nu.
+    #[test]
+    fn o_prefixo_da_ponte_e_ancorado() {
+        assert!(is_gated_path("/mcp"));
+        assert!(is_gated_path("/mcp/"));
+        assert!(is_gated_path("/mcp/qualquer-coisa"));
+        assert!(!is_gated_path("/mcporeia"));
     }
 
     #[tokio::test]

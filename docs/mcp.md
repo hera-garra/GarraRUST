@@ -341,6 +341,9 @@ timeouts:
 ## See also
 
 - [`docs/cli-mcp-server.md`](cli-mcp-server.md) — the reverse direction:
-  GarraIA as MCP **server** exposing `garra_ask` to other hosts.
+  GarraIA as MCP **server** exposing `garra_ask` to other hosts, over stdio.
+- [`docs/gateway-mcp-http.md`](gateway-mcp-http.md) — the same reverse
+  direction over **HTTP** (`POST /mcp`, #1513), with the five gateway tools.
+  That is the one an orchestrator that only accepts a URL needs.
 - [`docs/hermes-integration.md`](hermes-integration.md) — pairing
   GarraIA with another agent in both directions (loop topology, policy).

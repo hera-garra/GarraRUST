@@ -41,6 +41,23 @@ fn apply_telemetry_layers(router: Router) -> Router {
     router
 }
 
+/// #1513 — a ponte MCP Streamable HTTP, atras da feature `mcp-http-server`.
+///
+/// Duas assinaturas identicas em vez de um `#[cfg]` no meio da cadeia de
+/// `.merge()` do [`build_router`]: atributo condicional dentro de uma expressao
+/// method-chain nao e possivel, e um `if cfg!(...)` nao resolveria o `use` do
+/// modulo ausente. Sem a feature, o `Router` vazio deixa `/mcp` inexistente —
+/// o mesmo resultado de `gateway.mcp_http.enabled: false`.
+#[cfg(feature = "mcp-http-server")]
+fn mcp_http_routes(state: SharedState, push: crate::push_channels::PushMounted) -> Router {
+    crate::mcp_http::build_mcp_http_routes(state, push)
+}
+
+#[cfg(not(feature = "mcp-http-server"))]
+fn mcp_http_routes(_state: SharedState, _push: crate::push_channels::PushMounted) -> Router {
+    Router::new()
+}
+
 /// Build the main application router with all routes.
 /// True when the gateway's configured bind address reaches only this machine.
 ///
@@ -563,6 +580,15 @@ pub fn build_router(
         .merge(crate::mcp_marketplace::build_marketplace_install_routes(
             state.clone(),
             admin_store.clone(),
+        ))
+        // #1513: a ponte MCP Streamable HTTP em `POST /mcp`. Merjada AQUI, antes
+        // dos `.layer()` la embaixo, para ficar por dentro do gate de
+        // `gateway.api_key`, da guarda anti-CSRF e do rate limit — e nao por
+        // fora deles. Com `gateway.mcp_http.enabled` em `false` (o default) isto
+        // e um `Router` vazio e `/mcp` segue sendo um caminho inexistente.
+        .merge(mcp_http_routes(
+            state.clone(),
+            push_para_o_status.contagens(),
         ))
         .nest(
             "/admin",

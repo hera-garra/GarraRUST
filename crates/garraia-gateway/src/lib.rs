@@ -26,6 +26,12 @@ pub mod learning_auth;
 pub mod learning_handler;
 pub mod logs_handler;
 pub mod mcp;
+/// #1513 — o gateway como servidor MCP em `POST /mcp` (Streamable HTTP).
+///
+/// Nao confundir com [`mcp`], que e a direcao oposta: aquele e o registry dos
+/// servidores MCP que este gateway **consome**.
+#[cfg(feature = "mcp-http-server")]
+pub mod mcp_http;
 pub mod mcp_marketplace;
 pub mod memory_gauge_worker;
 pub mod memory_handler;

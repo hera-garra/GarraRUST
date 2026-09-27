@@ -622,6 +622,45 @@ fn validate_com_env(config: &AppConfig, env: &PerfilDaEnv, bind_env: &BindDaEnv)
         );
     }
 
+    // #1513: a ponte MCP em `POST /mcp` exige `gateway.api_key` — ela entrega a
+    // lista de conversas do dono e o historico delas, e o gate de `/api/*` e
+    // passa-direto sem chave. `garraia_gateway::mcp_http::decidir_montagem`
+    // recusa montar a rota nesse caso, e o boot avisa; este finding diz a mesma
+    // coisa onde o operador olha ANTES de subir. Warning e nao Error: o gateway
+    // sobe normalmente, so sem a ponte — e um `garra start` que morresse por
+    // causa disto seria pior que um endpoint ausente.
+    if config.gateway.mcp_http.enabled && !config.gateway.api_key_configurada() {
+        push_warn(
+            &mut findings,
+            "gateway.mcp_http.enabled",
+            "gateway.mcp_http.enabled: true without gateway.api_key — the MCP bridge at \
+             POST /mcp will NOT be mounted (it exposes chat list and history, so it \
+             requires a credential) and requests to it answer 404. Fix: set \
+             gateway.api_key (or GARRAIA_GATEWAY_API_KEY) and restart."
+                .into(),
+        );
+    }
+    // A mesma ideia para o segundo interruptor: `allow_send` sem allowlist de
+    // destino nao envia nada (`garra_send_message` nem e anunciada). Nao e
+    // perigoso — e o lado certo de errar —, mas e silencioso, e quem ligou a
+    // chave achava que tinha terminado.
+    if config.gateway.mcp_http.allow_send
+        && !config
+            .channels
+            .values()
+            .any(|c| c.channel_type == "telegram" && c.settings.contains_key("proactive_chat_ids"))
+    {
+        push_warn(
+            &mut findings,
+            "gateway.mcp_http.allow_send",
+            "gateway.mcp_http.allow_send: true but no telegram channel declares \
+             proactive_chat_ids — garra_send_message stays unavailable and every send is \
+             refused (no_allowlist). Fix: list the approved chats under \
+             channels.<name>.proactive_chat_ids."
+                .into(),
+        );
+    }
+
     // Timeouts: 0 means "no timeout" for reqwest/tokio — warn (user probably meant something else).
     if config.timeouts.llm.default_secs == 0 {
         push_warn(
@@ -3155,6 +3194,92 @@ mod tests {
             hit.message.contains("remove the flag"),
             "msg = {}",
             hit.message
+        );
+    }
+
+    /// #1513: a ponte MCP ligada sem credencial nao sobe, e o check diz isso
+    /// antes do boot. Warning — o gateway sobe, so sem a ponte.
+    #[test]
+    fn ponte_mcp_sem_credencial_e_warning() {
+        let mut cfg = AppConfig::default();
+        cfg.gateway.mcp_http.enabled = true;
+        let findings = validate(&cfg);
+        let hit = findings
+            .iter()
+            .find(|f| f.field == "gateway.mcp_http.enabled")
+            .expect("ponte sem credencial deve produzir finding");
+        assert!(matches!(hit.severity, Severity::Warning));
+        assert!(hit.message.contains("404"), "msg = {}", hit.message);
+    }
+
+    /// Com credencial, nenhum finding: e a configuracao correta da ponte.
+    #[test]
+    fn ponte_mcp_com_credencial_nao_gera_finding() {
+        let mut cfg = AppConfig::default();
+        cfg.gateway.mcp_http.enabled = true;
+        cfg.gateway.api_key = Some("uma-credencial-de-teste".into());
+        assert!(
+            !validate(&cfg)
+                .iter()
+                .any(|f| f.field == "gateway.mcp_http.enabled"),
+            "ponte configurada corretamente nao deve ter finding"
+        );
+    }
+
+    /// O default da instalacao nao produz finding nenhum da ponte — nem o do
+    /// `enabled`, nem o do `allow_send`.
+    #[test]
+    fn ponte_mcp_desligada_nao_gera_finding() {
+        let findings = validate(&AppConfig::default());
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.field.starts_with("gateway.mcp_http")),
+            "default gerou finding da ponte: {findings:?}"
+        );
+    }
+
+    /// `allow_send` sem allowlist nao envia nada, e isso e silencioso — o check
+    /// e quem conta.
+    #[test]
+    fn envio_por_mcp_sem_allowlist_e_warning() {
+        let mut cfg = AppConfig::default();
+        cfg.gateway.mcp_http.allow_send = true;
+        let hit = validate(&cfg)
+            .into_iter()
+            .find(|f| f.field == "gateway.mcp_http.allow_send")
+            .expect("allow_send sem allowlist deve produzir finding");
+        assert!(matches!(hit.severity, Severity::Warning));
+        assert!(
+            hit.message.contains("proactive_chat_ids"),
+            "msg = {}",
+            hit.message
+        );
+    }
+
+    /// Com a allowlist declarada, o finding do `allow_send` sai de cena.
+    #[test]
+    fn envio_por_mcp_com_allowlist_nao_gera_finding() {
+        let mut cfg = AppConfig::default();
+        cfg.gateway.mcp_http.allow_send = true;
+        cfg.channels.insert(
+            "tg".into(),
+            ChannelConfig {
+                channel_type: "telegram".into(),
+                enabled: Some(true),
+                settings: [(
+                    "proactive_chat_ids".to_string(),
+                    serde_json::json!([-100_123_i64]),
+                )]
+                .into_iter()
+                .collect(),
+            },
+        );
+        assert!(
+            !validate(&cfg)
+                .iter()
+                .any(|f| f.field == "gateway.mcp_http.allow_send"),
+            "allowlist declarada nao deve gerar finding"
         );
     }
 
