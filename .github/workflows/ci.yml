@@ -462,6 +462,27 @@ jobs:
           cargo clippy -p garraia --features mcp-http --all-targets -- -D warnings
           cargo test -p garraia-gateway --features mcp-http --test mcp_boot_pending_allowlist
 
+      - name: Run tests (mcp-http-server — a ponte MCP inbound)
+        # #1513. NAO confundir com o step acima: `mcp-http` e o **cliente**
+        # (este gateway consumindo servidor MCP de terceiros), `mcp-http-server`
+        # e o **servidor** (`POST /mcp`, `crate::mcp_http`).
+        #
+        # Diferente do `mcp-http`, esta feature esta no `default` do
+        # `garraia-gateway`, entao o `cargo test --workspace` do job `test` JA
+        # satisfaz o `required-features` do alvo e o executa. A linha explicita
+        # existe por dois motivos, e nenhum deles e redundancia:
+        #
+        # 1. O guard `scripts/ci/required_features_covered.py` nao raciocina
+        #    sobre features default — ele exige cobertura NOMEADA, e esta certo
+        #    em exigir: "esta no default hoje" e uma propriedade que um PR
+        #    futuro muda numa linha do `Cargo.toml`.
+        # 2. E exatamente esse PR futuro que isto protege. No dia em que alguem
+        #    tirar `mcp-http-server` do `default`, o alvo pararia de rodar no
+        #    job `test` **em silencio** — o modo de falha da #1242 — e o teste
+        #    que prova que `garra_send_message` nao envia sem aprovacao viraria
+        #    decoracao. Com esta linha, ele continua rodando.
+        run: cargo test -p garraia-gateway --features mcp-http-server --test mcp_http_contract
+
       - name: Run clippy + tests (mcp)
         # Buraco vizinho do `mcp-http` acima: `crates/garraia-agents` declara
         # `default = []` e `mcp = ["dep:rmcp"]`, e tanto `pub mod mcp` quanto
