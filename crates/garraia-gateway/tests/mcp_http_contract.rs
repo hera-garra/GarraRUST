@@ -360,6 +360,30 @@ async fn tools_call_read_history_declara_a_redacao() {
     assert_eq!(env["messages"], json!([]), "{env}");
 }
 
+/// O `initialize` diz que o servidor e o GarraIA, nao o SDK.
+///
+/// `ServerInfo::new` do rmcp preenche `server_info` com
+/// `Implementation::from_build_env()`, que resolve para o `CARGO_PKG_*` do
+/// **rmcp** — sondando uma ponte real antes desta correcao, o `initialize`
+/// respondia `{"name":"rmcp","version":"3.3.0"}`. Esse e o nome que o host
+/// mostra ao usuario na lista de servidores conectados: todo servidor escrito
+/// em rmcp apareceria como o mesmo "rmcp", e quem tivesse dois na maquina nao
+/// saberia qual e qual. O teste existe porque a regressao e silenciosa —
+/// nenhuma tool para de funcionar quando o nome volta a ser do SDK.
+#[tokio::test]
+async fn o_initialize_identifica_o_garraia_e_nao_o_sdk() {
+    let body = corpo_json(post_mcp(Ligacao::leitura(), Some(BEARER), initialize()).await).await;
+    let info = &body["result"]["serverInfo"];
+    assert_eq!(info["name"], "garraia-gateway", "{body}");
+    assert_eq!(info["version"], env!("CARGO_PKG_VERSION"), "{body}");
+    // E as instrucoes contam ao host que o envio e restrito, antes de ele
+    // tentar.
+    let instrucoes = body["result"]["instructions"]
+        .as_str()
+        .unwrap_or_else(|| panic!("initialize sem instructions: {body}"));
+    assert!(instrucoes.contains("garra_send_message"), "{instrucoes}");
+}
+
 /// Ler o historico de um `chat` que nao existe **nao cria** conversa.
 ///
 /// `hydrate_session_history` cria a sessao em memoria quando ela falta, o que e

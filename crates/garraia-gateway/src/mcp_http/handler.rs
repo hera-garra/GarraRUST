@@ -26,8 +26,8 @@ use std::sync::{Arc, Weak};
 
 use rmcp::ErrorData as McpError;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities, ServerInfo,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo,
 };
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler};
@@ -417,8 +417,32 @@ impl ServerHandler for ManipuladorMcpHttp {
     /// e o host le isso como "servidor sem tools" e nunca chama `tools/list` —
     /// a pegadinha que a GAR-585 pagou uma vez no servidor stdio. Nenhuma outra
     /// capability entra: esta ponte nao tem prompts, resources nem sampling.
+    ///
+    /// ## O `server_info` e nosso, nao do SDK
+    ///
+    /// `ServerInfo::new` preenche `server_info` com
+    /// `Implementation::from_build_env()`, que resolve para o `CARGO_PKG_*` do
+    /// **rmcp** — sondando a ponte de verdade, o `initialize` respondia
+    /// `{"name":"rmcp","version":"3.3.0"}`. E o nome que o host mostra ao
+    /// usuario na lista de servidores conectados, entao todo servidor escrito
+    /// em rmcp apareceria como o mesmo "rmcp", e o operador com dois servidores
+    /// MCP na maquina nao saberia qual e qual. Aqui ele diz GarraIA, com a
+    /// versao deste crate.
+    /// `ServerInfo` e `#[non_exhaustive]` no rmcp, entao a identidade e escrita
+    /// por mutacao em vez de struct-expression com `..` — que nao compila fora
+    /// da crate dele.
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
+        info.server_info = Implementation::new("garraia-gateway", env!("CARGO_PKG_VERSION"));
+        info.instructions = Some(
+            "Ponte MCP do GarraIA (gateway). Leitura: garra_status, garra_list_chats, \
+             garra_read_history (segredos redigidos), garra_pair_status. Escrita: \
+             garra_send_message, que so alcanca destinos que o operador liberou na config — \
+             nao ha como aprovar um destino novo por aqui, e ela nem aparece na lista de \
+             tools quando nenhum envio poderia sair."
+                .to_string(),
+        );
+        info
     }
 
     async fn list_tools(
