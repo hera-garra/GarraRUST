@@ -29,8 +29,8 @@ pub use model::{
     AUTH_ACCESS_TTL_MAX_SECS, AUTH_ACCESS_TTL_MIN_SECS, AUTH_REFRESH_TTL_MAX_SECS,
     AUTH_REFRESH_TTL_MIN_SECS, AUTH_SUPPORTED_JWT_ALGORITHMS, AgentConfig, AppConfig, AuthSection,
     ChannelConfig, EmbeddingProviderConfig, GatewayConfig, LlmProviderConfig, MAX_PATCH_BYTES_MAX,
-    MAX_PATCH_BYTES_MIN, McpServerConfig, MemoryConfig, NamedAgentConfig, S3StorageConfig,
-    StorageBackend, StorageConfig, TimeoutConfig, TypeTimeout, VoiceConfig,
+    MAX_PATCH_BYTES_MIN, McpHttpConfig, McpServerConfig, MemoryConfig, NamedAgentConfig,
+    S3StorageConfig, StorageBackend, StorageConfig, TimeoutConfig, TypeTimeout, VoiceConfig,
 };
 // #1225: os tipos de `agent.sandbox` moram no modulo proprio; o re-export
 // no nivel da crate segue o mesmo caminho de antes para os consumidores.

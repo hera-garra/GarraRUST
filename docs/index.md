@@ -9,7 +9,8 @@ Welcome to the GarraIA documentation. GarraIA is a secure, lightweight open-sour
 - [Configuration Reference](./configuration.md)
 - [Channel Integrations](./channels.md)
 - [MCP Setup](./mcp.md) — GarraIA as MCP **client**
-- [`garra mcp-server`](./cli-mcp-server.md) — GarraIA as MCP **server**
+- [`garra mcp-server`](./cli-mcp-server.md) — GarraIA as MCP **server** (stdio)
+- [`POST /mcp`](./gateway-mcp-http.md) — GarraIA as MCP **server** over HTTP, for external orchestrators
 - [Android / Termux install](./installation.md#android-termux)
 - [Hermes ↔ GarraIA Interop (MCP + A2A)](./integrations/hermes-mcp.md)
 - [Ollama — modelo padrão, `--model` e `ollama launch`](./integrations/ollama-launch.md)

@@ -18,6 +18,13 @@ Run `garraia config check` to see which directory and file are active.
 gateway:
   host: "127.0.0.1"  # Bind address
   port: 3888         # HTTP/WebSocket port
+  # #1513 — MCP Streamable HTTP bridge at POST /mcp, for an external
+  # orchestrator. Off by default; requires gateway.api_key to mount.
+  # See docs/gateway-mcp-http.md.
+  mcp_http:
+    enabled: false
+    allow_send: false          # unlocks garra_send_message
+    max_history_messages: 50
 
 # LLM Providers
 llm:

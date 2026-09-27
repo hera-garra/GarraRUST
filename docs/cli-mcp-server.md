@@ -530,6 +530,10 @@ working under a fully filtered environment:
 
 ## See also
 
+- [`docs/gateway-mcp-http.md`](gateway-mcp-http.md) — the HTTP sibling of
+  this page (`POST /mcp`, #1513). Same direction (GarraIA as server),
+  different transport and a different tool set: gateway state and channels
+  instead of `garra_ask`. Use it when the host only accepts a URL.
 - [`docs/mcp.md`](mcp.md) — the reverse direction: GarraIA as MCP
   **client** consuming external servers.
 - [`docs/hermes-integration.md`](hermes-integration.md) — pairing

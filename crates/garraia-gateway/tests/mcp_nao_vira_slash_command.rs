@@ -51,6 +51,22 @@ const SERVER: &str = "fixture-1386";
 /// `AgentRuntime`, o conserto NAO e afrouxar este teste: e fazer a chamada
 /// atras do `ToolGate`, com o modo da sessao e o `ToolApproval` no caminho,
 /// e entao decidir aqui, por escrito, por que aquele sitio e seguro.
+///
+/// # A excecao do `mcp_http` (#1513), por escrito
+///
+/// A ponte MCP **inbound** (`POST /mcp`) implementa `rmcp::ServerHandler`, cuja
+/// assinatura tem um `async fn call_tool` — e o nome que a trait escolheu para o
+/// metodo que o SDK invoca quando um cliente externo chama uma tool. Isso e a
+/// direcao OPOSTA do bypass que este guarda existe para impedir: la o gateway
+/// **executava** ferramenta de um servidor de terceiros por fora do `ToolGate`;
+/// aqui o gateway **e** o servidor, e o que ele expoe sao cinco tools proprias
+/// (`crate::mcp_http::ferramentas`), nenhuma delas vinda de `McpManager`.
+///
+/// A excecao e **condicional**, nao um nome na lista: o arquivo isento tem de
+/// nao mencionar `McpManager`. Assim, se alguem um dia meter um
+/// `mgr.call_tool(...)` dentro do handler inbound — juntando as duas direcoes no
+/// mesmo lugar, que e exatamente como o bypass voltaria sem ninguem notar —, a
+/// segunda asserção reprova.
 #[test]
 fn nenhum_fonte_de_producao_do_gateway_executa_ferramenta_mcp() {
     let raiz = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -68,6 +84,7 @@ fn nenhum_fonte_de_producao_do_gateway_executa_ferramenta_mcp() {
         // #1386). `Fonte::codigo` ja vem sem comentario, entao a mencao em
         // doc comment de `src/admin/mcp.rs` nao conta.
         .filter(|(_, fonte)| fonte.codigo.contains("call_tool("))
+        .filter(|(arq, _)| !HANDLER_INBOUND.contains(&arq.as_str()))
         .map(|(arq, _)| arq.clone())
         .collect();
 
@@ -76,7 +93,35 @@ fn nenhum_fonte_de_producao_do_gateway_executa_ferramenta_mcp() {
         "ferramenta MCP so pode ser executada pelo laco de tool-calling, atras do \
          `ToolGate` (#1386); chamam `call_tool` direto: {culpados:?}"
     );
+
+    // A condicao que mantem a excecao honesta: o handler inbound nao conhece o
+    // `McpManager`. Sem isto, `HANDLER_INBOUND` seria um buraco permanente.
+    let com_manager: Vec<&str> = arquivos
+        .iter()
+        .filter(|(arq, _)| HANDLER_INBOUND.contains(&arq.as_str()))
+        .filter(|(_, fonte)| fonte.codigo.contains("McpManager"))
+        .map(|(arq, _)| arq.as_str())
+        .collect();
+    assert!(
+        com_manager.is_empty(),
+        "o handler MCP inbound passou a mencionar `McpManager` — a excecao do #1513 \
+         valia justamente por ele nao executar ferramenta de terceiros: {com_manager:?}"
+    );
+
+    // E a excecao tem de continuar apontando para arquivo que existe, senao ela
+    // silenciosamente deixa de cobrir o que dizia cobrir.
+    for isento in HANDLER_INBOUND {
+        assert!(
+            arquivos.iter().any(|(arq, _)| arq == isento),
+            "a varredura nao achou {isento}; renomeado? a excecao do #1513 ficou orfa"
+        );
+    }
 }
+
+/// Os fontes que implementam `rmcp::ServerHandler` (MCP **inbound**) e por isso
+/// definem um `call_tool` que nao e o bypass do #1386. Ver a doc de
+/// [`nenhum_fonte_de_producao_do_gateway_executa_ferramenta_mcp`].
+const HANDLER_INBOUND: &[&str] = &["mcp_http/handler.rs"];
 
 /// Aponta o binario de teste inteiro para um diretorio de config descartavel
 /// antes que qualquer teste construa um `AppState`.
