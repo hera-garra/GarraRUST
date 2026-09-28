@@ -9,7 +9,7 @@
 
 ## ADRs — Architectural Decision Records
 
-Decisões irreversíveis são registradas antes de implementar ([índice](https://github.com/michelbr84/GarraRUST/blob/main/docs/adr/README.md)). São 24 ADRs; todas **accepted**, exceto a 0018, ainda **proposed**:
+Decisões irreversíveis são registradas antes de implementar ([índice](https://github.com/michelbr84/GarraRUST/blob/main/docs/adr/README.md)). São 25 ADRs; todas **accepted**, exceto a 0018, ainda **proposed**:
 
 | # | Decisão | Data |
 |---|---|---|
@@ -37,3 +37,4 @@ Decisões irreversíveis são registradas antes de implementar ([índice](https:
 | [0022](https://github.com/michelbr84/GarraRUST/blob/main/docs/adr/0022-default-llm-identity.md) | `z-ai/glm-5.3-flash` via OpenRouter como LLM padrão; local como segunda opção | 2026-09-13 |
 | [0023](https://github.com/michelbr84/GarraRUST/blob/main/docs/adr/0023-whatsapp-dispositivo-vinculado.md) | WhatsApp pessoal por dispositivo vinculado (`garra whatsapp`) — bridge Node/Baileys por stdio + sessão cifrada | 2026-09-16 |
 | [0024](https://github.com/michelbr84/GarraRUST/blob/main/docs/adr/0024-perfis-de-execucao-isolated-pod.md) | Perfis de execução `standard` e `isolated-pod` — poder total dentro do pod, nada implícito fora; dono do WhatsApp por identidade declarada; Amendment 2026-09-21: `bash` sem humano no laço só com sandbox `docker`/`podman` em `standard` (#1272) | 2026-09-21 |
+| [0025](https://github.com/michelbr84/GarraRUST/blob/main/docs/adr/0025-classes-de-capacidade-e-politica-de-acesso-v2.md) | Classes de capacidade, teto por principal e **Access Policy v2** do WhatsApp — toda tool declara o que faz em classes fechadas (sem classe, modo restrito falha fechado); o nível do principal é teto que compõe com o modo (só tira, nunca põe); `channels.whatsapp_linked.access` é o motor único da CLI, da API admin e do Web Console | 2026-09-26 |

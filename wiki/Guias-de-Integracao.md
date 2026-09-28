@@ -33,7 +33,9 @@
 ## MCP (Model Context Protocol)
 
 - [Configurar servidores MCP (stdio + HTTP)](https://github.com/michelbr84/GarraRUST/blob/main/docs/src/mcp.md) (versão mais completa; há um resumo em [docs/mcp.md](https://github.com/michelbr84/GarraRUST/blob/main/docs/mcp.md))
-- [GarraIA como servidor MCP: `garra mcp-server`](https://github.com/michelbr84/GarraRUST/blob/main/docs/cli-mcp-server.md)
+- [GarraIA como servidor MCP por stdio: `garra mcp-server`](https://github.com/michelbr84/GarraRUST/blob/main/docs/cli-mcp-server.md)
+- [O gateway como servidor MCP por HTTP: `POST /mcp`](https://github.com/michelbr84/GarraRUST/blob/main/docs/gateway-mcp-http.md) — Streamable HTTP, novo na v0.4.6 (#1513)
+- Desde a v0.4.6, uma tool de servidor MCP **não vira mais slash command** (#1386): o registro automático a expunha como `/comando`, fora do `ToolGate` dos modos. Chame-a como ferramenta, sob a política do modo.
 
 ## IDE / VS Code
 

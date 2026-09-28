@@ -6,6 +6,785 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-09-27
+
+Release que fecha o acesso ao WhatsApp pessoal de ponta a ponta e faz o runtime
+parar de mentir sobre o que ele pode. A peca central e a **Access Policy v2**
+(#1388, ADR 0025): `channels.whatsapp_linked.access` ganha modo de admissao
+explicito, default declarado para quem nao esta na lista, piso e teto por
+principal e politica independente por grupo, num motor unico que a CLI
+(`garraia whatsapp access|level|write|block|unblock|users|remove|owner|unowner`),
+a API admin e a nova pagina "WhatsApp Access" do Web Console compartilham — nao
+tres copias da mesma regra. Quem administra ve o efeito antes de confirmar,
+identidade aparece so pelos quatro ultimos digitos em toda tela e todo `--json`,
+e cada comando de permissao deixa rastro no audit. O `garraia doctor whatsapp` e
+o "Test WhatsApp" do console rodam o MESMO motor de diagnostico, e o wizard
+`garraia whatsapp link` termina mostrando a politica em vigor em vez de um
+"pronto" que nao dizia quem podia falar.
+
+A segunda frente e a **honestidade do runtime** (#1381, #1387, #1416; ADR 0025
+§5). Um registro de capacidades unico passa a ser a fonte de `garra_status`, do
+`/api/diagnostics`, do `GET /admin/api/capabilities` e da nota que o modelo le:
+cada capacidade tem estado (`visible`, `denied`, `unavailable`, `unhealthy`,
+`not_configured`), motivo legivel e remediacao, e o prompt proibe inferir
+ausencia a partir de invisibilidade — `denied` e "existe e nao esta liberada",
+nunca "nao existe". Junto vem a classificacao de toda ferramenta em classes
+fechadas de capacidade com teto por principal (#1385, #1392): sem classe
+declarada, modo restrito falha fechado. Ferramenta registrada mas nao
+operacional sai da lista chamavel em vez de ser oferecida e falhar (#1425).
+
+Na seguranca, o MCP `filesystem` passa a ser confinado ao mesmo jail de sessao
+que governa as file tools nativas (#1482, #1383) — antes havia dois portoes com
+regras diferentes no mesmo turno; uma ferramenta MCP deixa de virar slash
+command, que era bypass do `ToolGate` (#1386); um `session_id` escolhido pelo
+cliente nao alcanca mais a conversa de um canal com humano do outro lado nem a
+do app mobile, na escrita e na leitura por id (#1462); o `/api/diagnostics` para
+de publicar caminho absoluto do host (#1465); e o mascaramento de telefone
+cobre os separadores comuns (#1514). Uma sessao sem projeto ganha um workspace
+padrao seguro **isolado por sessao** com diretorio `0700` em vez de `NoRoots`
+(#1378, #1449, #1463), e `/project` seleciona um projeto cadastrado por sessao,
+persistido no `sessions.db` e reconfinado pelas raizes do operador a cada boot
+(#1379, #1424).
+
+Confiabilidade e operacao: circuit breaker por sessao e ferramenta no unico
+ponto de despacho — falha determinista pausa a ferramenta ate o fim do turno,
+timeout abre cooldown com backoff 15s→120s (#1417); registro local de
+confiabilidade de tools, MCP e canais, sem nada sair da maquina (#1438); fatia
+de dados da retencao de memoria e do ledger (#1436); e o gateway passa a servir
+MCP por HTTP em `POST /mcp` (#1513). O CI volta a subir sem depender de registry
+para o MinIO — o quay.io fechou a distribuicao anonima em 2026-09-24 e a imagem
+agora e construida do fonte da tag fixada (#1458) — e o runbook de release ganha
+o gate de dogfood D1-D10 obrigatorio antes de todo tag (#1439), com a parte
+Linux automatizada por `scripts/dogfood/linux-clean-install.sh` (#1426).
+
+Sem mudanca de formato de config nem de sessao: `garraia update` a partir da
+v0.4.5 e direto. Quem ja tinha `allow`/`owners` no `config.yml` continua
+valendo — a Access Policy v2 le o legado e o `access.groups.enabled` declarado
+vence o `reply_in_groups` antigo (#1501).
+
+### Added
+- **Projeto ativo por sessao, persistido, e comandos de barra no WhatsApp
+  por principal (#1379, #1424; ADR 0025).** `/project [list|<nome ou
+  id>|clear]` seleciona um projeto cadastrado para a conversa: o caminho e
+  confinado de novo pelas raizes de projeto do operador
+  (`GARRAIA_PROJECT_ROOTS`), vira o `working_dir` das file tools e do
+  `repo_search`, e o vinculo fica no `sessions.db` (`sessions.project_id`):
+  um `garraia restart` restaura o projeto na hidratacao da sessao — e um
+  projeto que ficou fora das raizes nao volta (fail-closed). A resposta
+  mostra nome e id curto, nunca o caminho. `POST /api/projects` e
+  `GET /api/projects` passam a gravar e ler o banco quando ha `sessions.db`
+  (antes viviam so em memoria). No WhatsApp pessoal, uma mensagem que
+  comeca com `/` e decidida por principal ANTES de ir ao modelo: `/help`
+  para todo admitido, `/project` para dono e usuario, `/mode` e `/goal` so
+  para o dono (o nivel dos demais vem da politica de acesso); comando
+  registrado fora dessas listas e recusado com motivo; o que nao e comando
+  segue como texto. Selecionar projeto nao muda poder: o que se pode fazer
+  nele continua sendo o portao do turno (modo e teto do principal).
+- **Registro de capacidades do runtime (#1381, #1387, #1416; ADR 0025 §5).**
+  Uma funcao so (`capacidades_registro::registro`) reune o inventario do
+  runtime, o portao do turno (nome e classe), a disponibilidade de cada
+  ferramenta, o estado dos servidores MCP e a exposicao do `bash` numa
+  visao por capacidade com estado — `visible`, `denied`, `unavailable`,
+  `unhealthy`, `not_configured` — e motivo legivel por maquina e por humano
+  (mais remediacao). `garra_status` passa a devolver `capabilities` (e a
+  nota do prompt manda o modelo responder a partir dela: `denied` e
+  "existe e nao esta liberada", nunca "nao existe"; `unavailable` repete a
+  remediacao); o `/api/diagnostics` ganha `tools.capabilities` (contagens
+  por estado e o que esta indisponivel/fora do ar/nao configurado);
+  `GET /admin/api/capabilities` expoe o mesmo registro ao console.
+  `device_read`/`device_execute` ficam indisponiveis (`no_devices`) sem
+  dispositivo registrado; `device_list` continua, porque e ela que explica.
+- **Classes de capacidade e teto por principal (#1385, #1392, ADR 0025).** Toda
+  ferramenta declara o que faz em classes fechadas (`filesystem.read`,
+  `filesystem.write`, `process.execute`, `network.read`, `message.send`,
+  `device.*`, `memory.*`, `runtime.inspect`, `scheduling`, `mcp.read`,
+  `mcp.write`): nativas por tabela fechada, MCP pela operacao de filesystem
+  conhecida ou pelas anotacoes do servidor; sem classe e fail-closed em modo
+  restrito. `ToolPolicy` ganha `allowed_capabilities`, `denied_capabilities` e
+  `no_tools`; o `ExecContext` ganha um teto (`TetoDeCapacidades`) composto por
+  E com o modo em todo ponto do runtime — a lista que o modelo ve, o despacho e
+  o `garra_status`. Os niveis `chat|read|full` e o `write on|off` do WhatsApp
+  compilam para esse teto (`politica_do_nivel`): `write` mexe so em escrita de
+  arquivo, nativa e MCP, e nunca desliga sandbox, jail nem confirmacao. A
+  recusa diz se foi o modo ou a politica de acesso. O inventario de
+  ferramentas expoe as classes.
+- **Access Policy v2 do WhatsApp pessoal: `channels.whatsapp_linked.access`
+  (#1388, #1390, #1391, #1392, #1399, #1412, #1421, #1423; ADR 0025).** Quem
+  fala com o agente e ate onde cada um vai, por principal: `admission`
+  (`restricted` | `open`), `default` (o que um desconhecido recebe em `open`,
+  nunca `full`), `users` (por numero ou JID: `level: chat|read|full`,
+  `write: on|off`, `role: owner`, `blocked: true`) e `groups` (`enabled`,
+  `default` e politica por JID de grupo). O nivel e o `write` compilam para
+  um teto de capacidades composto por E com o modo da sessao: o teto so
+  tira, nunca poe, e `write` mexe so em escrita de arquivo (nativa e MCP) —
+  shell, dispositivo, mensagem e agenda sao controles independentes. Grupo
+  nunca herda o papel do dono; bloqueado vence `open`, `allow` e pareamento;
+  nivel desconhecido e `chat`; a secao inteira e relida por turno (um
+  bloqueio vale na mensagem seguinte) e cada normalizacao deixa um aviso
+  sem numero. Compatibilidade: `allow`, `owners` e `reply_in_groups`
+  continuam valendo e, sem `access:`, nada muda — nivel e `write` so
+  existem onde foram declarados; a excecao e quem entrou por codigo do
+  `/pair`, que passa a ter teto `read` (credencial fraca). O log do turno
+  ganha `principal` e `alcance` (etiquetas fixas, nunca identidade).
+- **`garra whatsapp users` lista quem pode falar com o GarraIA (#1393).** O `status`
+  dizia so QUANTOS estavam autorizados, e quem tinha liberado tres numeros meses
+  atras precisava abrir o `config.yml` a mao para saber quais eram. O comando novo
+  mostra o papel (`allow` ou `owners`) e os quatro ultimos digitos de cada
+  identidade — nunca o numero inteiro, nem na tela nem no `--json`, que sai como
+  documento unico (`{enabled, authorized, owners, users[]}`) para script.
+- **`garra whatsapp remove <numero>` revoga o acesso pela CLI (#1394).** Ate aqui
+  autorizar tinha comando e revogar so existia editando o `config.yml`. O `remove`
+  e o espelho do `allow`: tira a identidade de `allow` e de `owners` pela mesma
+  chave que o portao do gateway compara (o celular com e sem o nono digito e o
+  mesmo), preserva as outras chaves da secao e **nao** desliga o canal. Remover um
+  DONO exige confirmacao explicita — `--yes`/`-y` fora do terminal, pergunta com
+  default NAO dentro dele —, e quem nao estava na lista sai 0, porque revogar e
+  idempotente.
+- **`garra whatsapp owner` / `unowner` administram o papel de dono (#1395).** Ate aqui
+  virar dono so acontecia junto com o `allow --owner` (ou dentro do `link`), e deixar
+  de ser dono so existia editando o `config.yml` a mao — ou passando o `remove`, que
+  tira o acesso junto. O `owner <numero>` grava em `owners` pela mesma escrita do
+  `allow --owner`, com as mesmas duas portas: `execution.profile = isolated-pod`
+  obrigatorio (64 fora dele) e confirmacao explicita, `--yes`/`-y` fora do terminal.
+  O `unowner <numero>` tira o papel **sem nunca tirar o acesso**: quando a identidade
+  so existia em `owners`, a entrada passa para `allow` na mesma escrita, entao nao ha
+  instante no disco em que a pessoa fique fora das duas listas. Rebaixar funciona em
+  qualquer perfil, de proposito — e em `standard` que um dono esquecido e um
+  privilegio latente —, e a confirmacao vale para o **ultimo** dono, o unico
+  rebaixamento que deixa a configuracao sem dono nenhum. Os dois comandos sao
+  idempotentes, so imprimem os quatro ultimos digitos de cada identidade e aparecem
+  no `whatsapp users` e no `status` na mensagem seguinte, sem reiniciar o gateway.
+- **`garraia whatsapp access`, `level`, `write`, `block`, `unblock`: a Access
+  Policy v2 pela CLI (#1396, #1397, #1398, #1399, #1400, #1401, #1413,
+  #1414; ADR 0025).** `access` imprime a politica efetiva inteira (admissao,
+  default do desconhecido, grupos, e cada principal com piso, nivel e o que
+  pode de fato — calculado pelo MESMO `ToolGate` do turno, nunca por um
+  parser paralelo), com `--json` e, so localmente, `--reveal`. `access
+  open|restricted` troca a admissao (`open` avisa e pede confirmacao ou
+  `--yes`); `access default chat|read [--write]` define o que um desconhecido
+  recebe em `open` (`full` e recusado); `level <numero> chat|read|full` e
+  `write <numero> on|off` gravam nivel e escrita por identidade (`write`
+  mexe so em escrita de arquivo, nativa e MCP); `block`/`unblock`; `access
+  groups on|off|default <nivel>` e `access group <jid> <nivel>`; `access
+  reset` volta ao seguro preservando donos e bloqueios (confirmacao ou
+  `--yes`, idempotente). Toda mutacao aceita `--dry-run`: mostra o que
+  mudaria e o impacto por principal (o que ganha e perde: escrita, shell,
+  dispositivo, mensagem, MCP) sem gravar nem auditar. Toda mutacao aplicada
+  vai para `<data_dir>/audit/whatsapp-access.jsonl` (`0600`, rotacao por
+  tamanho, `audit_max_bytes` na secao): quando, quem, por onde, acao, alvo
+  `...1234` e o resumo antes/depois — nunca identidade inteira, chave ou
+  mensagem; `access audit [--json] [--limit N]` le a trilha. Um unico caminho
+  de mutacao no gateway (`whatsapp_linked_politica::mutacao`), que a API
+  admin e o Web Console reutilizam. Exit codes: 0 · 1 cancelado · 64 uso ·
+  65 dado invalido · 70 config · 73 gravou mas o audit falhou.
+- **API admin da Access Policy v2 (#1402, #1412, #1413, #1414; ADR 0025):**
+  `GET /admin/api/whatsapp/access` devolve a politica efetiva — o MESMO
+  documento de `garraia whatsapp access --json`, produzido por
+  `whatsapp_linked_politica::visao` — mais `hot_reload` (se o gateway rele
+  a config a quente); `POST /admin/api/whatsapp/access` aplica uma mutacao
+  (`action`: open | restricted | default | level | write | block | unblock |
+  groups | group-default | group | reset, com `identity`/`jid`/`level`/
+  `write`/`enabled` e `dry_run`) pelo mesmo `mutacao::aplicar` da CLI —
+  validacao antes de gravar (400 com a mensagem acionavel), escrita atomica
+  `0600`, impacto por principal (o que ganha e perde) e audit com `origem:
+  admin_api` e o username do admin; `GET /admin/api/whatsapp/access/audit`
+  le a trilha. Leitura com `Channels/Read` (viewer le), mutacao com
+  `Channels/Update` (viewer recebe 403); cookie e CSRF dos layers do
+  `/admin`. A API nunca revela identidade (so `...1234`). O check
+  `whatsapp.access` do `/api/diagnostics` passa a avisar `access.admission:
+  open` (com o passo para fechar) e secao `access` com valor invalido.
+- **Web Console — pagina "WhatsApp Access" (#1402, #1403, #1404, #1405,
+  #1406, #1407, #1408, #1411, #1413; ADR 0025).** Terceiro consumidor do
+  caminho unico: le `GET /admin/api/whatsapp/access` (o mesmo documento da
+  CLI) e muda por `POST /admin/api/whatsapp/access`. Resumo (canal, perfil
+  de execucao, piso do dono, hot reload, contagens, avisos), admissao
+  `restricted` / `Anyone (open)`, default do desconhecido, grupos (liga/
+  desliga, default, politica por JID), formulario "Add phone / identity"
+  com nivel e write, matriz por principal (piso, nivel, write, o que pode
+  de fato) com seletor `chat|read|full`, toggle de write, Block/Unblock,
+  Make owner/Demote e Remove, botao "Reset to safe defaults" e a trilha de
+  audit. **Toda mutacao passa por um preview** (`dry_run`: mudancas + o que
+  cada principal ganha e perde) antes de confirmar; elevacoes perigosas
+  (`open`, owner, reset) trazem aviso. A pagina so conhece `...1234`: age
+  sobre uma linha mandando `identity_last4`, que o gateway resolve entre
+  as identidades declaradas (ambiguo = 409); a identidade inteira nunca
+  desce ao navegador. `data-testid` estaveis + spec Playwright
+  `tests/playwright/whatsapp-access.spec.ts`. Motor: `Mutacao::Papel`
+  (owner/unowner, preservando o acesso ao rebaixar o dono legado) e
+  `Mutacao::Remover` (tira de `allow`, `owners` e `access.users`), tambem
+  expostos na API (`owner`, `unowner`, `remove`).
+- Web Console mostra, por sessao, o principal do WhatsApp pessoal (dono, usuario, pareado, grupo...), o nivel e o modo EFETIVO do turno (piso do canal e escolha da sessao), e o projeto ativo sem caminho; `GET /admin/api/sessions` traz `principal`, `level`, `write`, `chosen_mode`, `effective_mode`, `project_name` e `has_workspace` (#1409). Botao "Capabilities" por sessao abre o painel daquela conversa (`GET /admin/api/capabilities?session_id=`), com o portao real do turno: o que esta visivel, negada, indisponivel, fora do ar ou nao configurada, com motivo e passo (#1415).
+- **Web Console mostra o perfil de execucao no header (#1410).** O perfil do
+  ADR 0024 (`standard` | `isolated-pod`) so aparecia como uma linha dentro da
+  pagina Diagnostics, e `isolated-pod` e justamente o perfil que da ao agente
+  poder total dentro do pod — o operador precisava navegar para descobrir em
+  qual dos dois o gateway esta. Agora um badge fixo no header le
+  `/api/settings/effective` (auth-free, secret-free), mostra o valor e a
+  origem (`default` | `file` | `env`) e, em `isolated-pod`, muda de tom e
+  carrega no tooltip o mesmo aviso do boot: o pod e a fronteira de seguranca,
+  nao o Garra, e como reverter.
+- **Circuit breaker para ferramentas que falham repetidamente (#1417).** No
+  dogfood da v0.4.5 o modelo repetia `repo_search` varias vezes no mesmo
+  turno depois de uma falha que nao ia mudar (sem repositorio) e de timeouts.
+  O runtime ganha um breaker por sessao e por ferramenta
+  (`garraia_agents::tools::breaker`, estado puro, relogio injetado), no unico
+  ponto de despacho: falha deterministica (sem raiz para as file tools,
+  `repo_search` sem repositorio) poe a ferramenta em pausa ate o fim do
+  turno; timeout abre um cooldown que dobra a cada timeout seguido (15s ate
+  120s) e atravessa turnos; erro generico so abre depois de tres iguais no
+  turno — e a recusa de caminho fora das raizes e generica de proposito,
+  porque vale para um caminho e o modelo corrige o caminho na chamada
+  seguinte. Em pausa, a chamada nao roda e o modelo recebe o motivo
+  estruturado ("temporariamente indisponivel nesta conversa (`no_roots` |
+  `no_repository` | `timeout` | `repeated_error`)") com a instrucao de nao
+  repetir. Sucesso fecha o breaker
+  da ferramenta; `working_dir` diferente num turno novo limpa a sessao.
+  `garra_status` devolve `breaker` (tool, `reason_code`, `reason`) e
+  `breaker_means`; a nota do prompt manda o modelo respeitar a lista. O
+  agregado no `/api/diagnostics` fica para a #1438.
+- **`garraia doctor whatsapp` (#1419).** O caminho do WhatsApp pessoal de ponta
+  a ponta numa passada: vinculo (`LinkHealth`, a mesma tabela do `status` e do
+  console), chave da sessao (origem e prova de que abre), gateway e ponte
+  (com o gateway de pe, o que o `/api/diagnostics` diz; sem ele, a linha diz
+  que nao sabe), acesso (contagens de autorizados e donos), perfil de execucao
+  (`isolated-pod` e sempre aviso, dizendo o que o dono ganha), raizes das file
+  tools (o mesmo resolvedor do boot), MCP visivel no piso `search` (servidor
+  inteiro, so operacoes de leitura, ou escondido — com a sintaxe para liberar)
+  e provider padrao. Cada linha traz o proximo passo; `--json` fala o
+  vocabulario do `/api/diagnostics` (`ok`/`warning`/`error`/`not_configured`);
+  exit 0 tudo verde, 2 aviso sob `--strict`, 69 algo vermelho. Nenhuma linha
+  carrega numero, LID, chave ou URL com credencial.
+- **Web Console: "Test WhatsApp" com o MESMO motor do `garraia doctor
+  whatsapp` (#1420).** A tabela do doctor (fatos → linhas, agregado, exit
+  code) saiu da CLI e mora em
+  `garraia_gateway::bootstrap::whatsapp_linked_doctor`; a CLI virou
+  consumidora e a saida dela (`--json`, tabela humana, exit 0/2/69) nao
+  mudou. O gateway ganhou `GET /admin/api/whatsapp/doctor?lang=pt|en`
+  (cookie do `/admin`, `Channels/Read` — viewer le), que colhe os fatos em
+  processo — vinculo com a view REAL da ponte, chave da sessao pela mesma
+  resolucao do boot (so quando ha sessao; nunca materializa arquivo numa
+  rota de leitura), config viva, e as linhas do proprio `/api/diagnostics`
+  por chamada de funcao, sem HTTP — e devolve `{ status, version, lang,
+  checks }` com `checks` identico ao `report.checks` do `--json`. Na pagina
+  WhatsApp Access, um card no topo roda o teste: resumo, uma linha por check
+  (vinculo, chave, gateway e ponte, acesso, perfil de execucao, workspace,
+  MCP visivel no piso, provider) e, para cada linha nao-verde, uma acao
+  segura — rolar ate a matriz de acesso, abrir MCP Servers / Providers /
+  Configuration, ou copiar o passo de terminal (mostrado, nunca executado).
+  Funciona com o canal parcialmente configurado (e o caso do CI). Nenhum
+  segredo, chave de sessao ou numero sai: teste de integracao alimenta chave
+  de gateway e de provider e varre o corpo; spec Playwright varre o HTML do
+  card.
+- WhatsApp pessoal: toda mensagem que o portao recusa e contada por motivo (`restricted_policy`, `unresolved_lid`, `blocked_user`, `channel_disabled`, `prompt_injection`), com o final da identidade (`...1234`) e o instante, nunca o numero inteiro nem o texto. O Web Console (pagina WhatsApp Access) mostra as contagens e as ultimas 50, com a acao certa por motivo (autorizar, parear, desbloquear, ligar o canal) e um reset auditado; `GET /admin/api/whatsapp/access` traz `rejections` e `POST /admin/api/whatsapp/access/rejections/reset` zera; o `/api/diagnostics` (sem autenticacao) so ve as contagens. Retencao definida: desde o boot, zera no restart ou no reset (#1422).
+- **`scripts/dogfood/linux-clean-install.sh` automatiza o dogfood Linux
+  (D1/D9 da matriz de release) num container limpo (#1426, #1439).**
+  A v0.4.4 e a v0.4.5 sairam com CI verde e quebraram no caminho real de
+  quem instala; o CI prova que o codigo compila, nao que o PACOTE funciona
+  para uma pessoa. O script obtem um `.deb` x86_64 da CLI (artefato
+  `garraia-linux-packages` de um run do `release.yml` via `gh run
+  download`, ou build local empacotado com o mesmo `nfpm` pinado e o mesmo
+  `packaging/nfpm.yaml` da release), sobe um `ubuntu:24.04` cru com
+  `--network host`, instala com `apt-get install ./garraia.deb` e prova o
+  fluxo inteiro: `garraia --version` (e o alias `garra`), `doctor --json`
+  (exit 0, JSON valido), `doctor whatsapp --json` (exit 69 sem WhatsApp,
+  linha `whatsapp.linked` presente), `config set-model` apontando para o
+  Ollama do host sem chave paga, `start -d` na 3899 ate `/api/health`
+  `healthy`, sessao REST com resposta real do modelo, `restart -d` com
+  sessao e config sobrevivendo (historico readotado do `sessions.db`,
+  provider/modelo no health do processo novo) e `stop` com porta fechada
+  e pid file removido. O curl/jq ficam do lado do host, entao o container
+  nao ganha nenhuma ferramenta que um usuario nao teria. A evidencia
+  (logs, JSONs, resposta do modelo, `.deb` testado, `resumo.txt` e
+  `resumo.json` PASSOU/FALHOU por passo) vai para `dogfood/linux/<data>/`,
+  gitignored. `docs/releasing.md` §1.5 registra o comando na matriz.
+- **O wizard `garra whatsapp link` oferece a politica de acesso depois do QR
+  (#1429; ADR 0025).** Depois de perguntar o primeiro numero (e o dono, em
+  `isolated-pod`), o wizard passa a perguntar, com defaults seguros: o nivel
+  de quem acabou de entrar (`chat` | `read` | `full`, default `read`) e, fora
+  de `chat`, a escrita de arquivo (default nao); e a admissao — so quem voce
+  autorizar (`restricted`, default) ou qualquer numero (`open`). Escolher
+  `open` mostra o default que um desconhecido recebe NESTA config e pede a
+  mesma confirmacao do `access open`, com default nao. Cada resposta e
+  gravada pelo mesmo motor do `access` (`whatsapp_linked_politica::mutacao`:
+  validacao, escrita atomica `0600`, audit com origem `cli`) — o wizard nao
+  tem uma segunda forma de escrever politica, e Enter em tudo deixa o numero
+  com `read` sem escrita e o canal fechado. Dono nao recebe pergunta de nivel
+  (dono nao tem teto). `link --allow <numero> [--owner]` continua identico e
+  scriptavel: nada novo e perguntado, o numero entra sem teto como o `allow`
+  gravaria. O resumo final passa a ser o da politica efetiva (as linhas do
+  `access`), no lugar do resumo do `users`.
+- **O `garra init` oferece WhatsApp ao lado do Telegram (#1430).** O passo de canal
+  do wizard so sabia perguntar por Telegram, e quem instalava o GarraIA para usar
+  no WhatsApp tinha de adivinhar que existe um `garra whatsapp link` separado. Ele
+  virou uma lista: nenhum canal (o default — Enter sem ler continua nao conectando
+  nada), Telegram, WhatsApp pelo numero pessoal, ou os dois. O rotulo do WhatsApp
+  ja diz na lista que o caminho e o de aparelho conectado por um cliente NAO
+  oficial, e escolher a opcao entrega ao mesmo fluxo de sempre — tela de
+  consentimento com default nao, QR e a pergunta de quem pode falar, nada
+  reimplementado no wizard. A entrega roda DEPOIS de o `config.yml` ser escrito,
+  porque o vinculo grava na mesma secao `channels.whatsapp_linked`; um vinculo que
+  nao complete (sem Node, QR nao lido, desistencia) nao derruba o `init`, que so
+  diz como tentar de novo. Instalacao sem terminal nao chega ao passo.
+- **Plano da chave de sessao e modos apertados no link do WhatsApp (#1431).**
+  `SessionKey::plan` diz o que o resolve faria no diretorio da conta (passphrase
+  do cofre, `session.key` existente ou nova) sem criar arquivo nem derivar PBKDF2
+  — o mesmo predicado (`usable_passphrase`, passphrase vazia conta como ausente)
+  governa plano e resolve, e a configuracao do wizard passa a poder mostrar o
+  caminho seguro antes de criar qualquer coisa. `SessionStore::harden_modes`
+  aperta o diretorio da conta para 0700 e todo arquivo regular dentro dele para
+  0600 (incluido o `recusas-lid.json` que o gateway grava) e devolve o que
+  estava mais aberto, para a CLI avisar sem falhar; o salt passa a ser apertado
+  ao ser lido, como a `session.key` ja era. Symlink dentro do diretorio nao e
+  seguido nem reportado, modo mais fechado que o exigido fica como esta e fora
+  de Unix a lista volta vazia.
+- **Retencao de memoria e ledger: fatia de dados (#1436).** `garraia-config::retention`
+  passa a ser o dono das faixas de `memory.retention` e `runs.retention_days`: o
+  `config check` delega para ele e o futuro `PATCH /admin/api/retention` vai
+  recusar o que esses mesmos achados chamam de Error, com patch campo a campo
+  (`deny_unknown_fields`) e a janela da limpeza manual. `garraia-db::retention`
+  conta o que uma limpeza apagaria sem apagar (mesma clausula do `DELETE`,
+  cobrada por teste), mede o tamanho dos dois bancos e grava a ultima limpeza no
+  proprio banco: `compact` e `prune_agent_runs` anotam a execucao, entao worker,
+  CLI e console passam a ver o mesmo lugar. A pagina e o endpoint do console
+  vêm em fatia propria.
+- **Registro local de confiabilidade de tools, MCP e canais (#1438).** Modulo puro
+  `garraia_agents::observabilidade`: por ferramenta, chamadas por desfecho
+  (sucesso, erro, timeout, negada pela politica, indisponivel, recusada pelo
+  breaker, aguardando confirmacao), aberturas do breaker, latencia em baldes
+  fixos (p50/p95 aproximados) e ultima falha; por servidor MCP, quedas e
+  reconexoes (o health monitor relata o transporte a cada tick, uma queda por
+  transicao vivo -> morto, e o desfecho de cada reconexao automatica); por canal,
+  conexoes, quedas e reconexoes; series de tamanho de armazenamento com teto.
+  Sessao nao e dimensao, nome fora do registro cai em `(unknown)`, tetos de
+  cardinalidade, `Instant` injetado e lock sem panico. Nada sai da maquina: so
+  nome de servidor e booleanos — nunca `last_error`, comando ou caminho. O
+  endpoint autenticado que expoe o snapshot vem em fatia propria.
+- **`scripts/setup-toolchain.sh` fixa a toolchain Rust localmente (#1452).**
+  O workspace exige rustc 1.95+, mas nada instalava/ativava essa versao
+  automaticamente para quem clonava o repo — o sintoma era `cargo
+  check`/`cargo test` falhando com "is not supported" ate rodar `rustup
+  update` manualmente. Um `rust-toolchain.toml` commitado foi tentado (PR
+  #1454) e quebrou os jobs de CI que fazem cross-compile com targets extras
+  (Android, Windows ARM64): o arquivo tem precedencia sobre a toolchain que
+  `dtolnay/rust-toolchain` acabou de instalar com esses targets. O script
+  evita isso: usa `rustup override set`, que grava a preferencia em
+  `~/.rustup/settings.toml` (no HOME de quem roda), nunca em um arquivo do
+  repo, entao o CI nao ve nem herda a mudanca.
+- **O gateway virou servidor MCP por HTTP, em `POST /mcp` (#1513).** O Garra ja
+  falava MCP como cliente (secao `mcp:`) e como servidor por stdio (`garra
+  mcp-server`, uma tool), mas nao a combinacao que um orquestrador externo
+  precisa — servidor, por URL. Sem ela nao havia como apontar o Paperclip (ou
+  qualquer host MCP que so aceite endereco) para este Garra. A ponte usa o
+  `rmcp` que ja estava no workspace, e expoe cinco tools: `garra_status`,
+  `garra_list_chats`, `garra_read_history` (com segredos redigidos pela mesma
+  `redact_secrets` do log), `garra_pair_status` e `garra_send_message`.
+  Transporte stateless com resposta em JSON, entao um `curl` confere o endpoint
+  sem parsear SSE. Tudo desligado por default: `gateway.mcp_http.enabled` liga a
+  rota, e ela **recusa subir sem `gateway.api_key`** — o gate de `/api/*` e
+  passa-direto sem chave, o que serve para o console local e nao serve para uma
+  ponte que entrega a lista de conversas do dono. O envio exige duas acoes
+  independentes do operador (`allow_send` mais o destino em
+  `proactive_chat_ids`), e uma tool que nao pode enviar nem e anunciada. O
+  `garra config check` avisa nos dois erros silenciosos: ponte ligada sem
+  credencial e envio ligado sem allowlist. `docs/gateway-mcp-http.md`.
+
+### Changed
+- **O modo `search` enxerga a leitura do MCP `filesystem` (#1384).** O piso de
+  todo remetente do WhatsApp pessoal escondia TODA ferramenta do servidor
+  `filesystem` — inclusive `read_text_file` e `list_directory` — porque a
+  whitelist so listava as nativas, e o modelo dizia nao ter como ler arquivo
+  com o servidor conectado. A `allowed` ganha uma terceira forma de entrada,
+  `*/<operacao>` (a operacao exata, em qualquer servidor), e `search` passa a
+  listar as dez operacoes somente-leitura do
+  `@modelcontextprotocol/server-filesystem` (`read_file`, `read_text_file`,
+  `read_media_file`, `read_multiple_files`, `list_directory`,
+  `list_directory_with_sizes`, `directory_tree`, `search_files`,
+  `get_file_info`, `list_allowed_directories`). Escrita (`write_file`,
+  `edit_file`, `create_directory`, `move_file`) e qualquer nome desconhecido
+  continuam fail-closed, e `denied` segue vencendo tudo. Os outros modos
+  somente-leitura nao mudam nesta fatia.
+- `docs/security/threat-model.md` ganha a secao 5.18 (politica de acesso por principal do WhatsApp pessoal, ADR 0025): fronteira, as tres decisoes por turno, tabela de ameacas com a prova de cada uma e o risco residual (#1388).
+- `garraia whatsapp status` (e `users`) passam a dizer a admissao (`restrita` ou `ABERTA`, com o default que um desconhecido recebe) e o `--json` ganha `admission` e `default_access`; com a admissao aberta o aviso de "ninguem autorizado" nao sai, porque nao e verdade (#1399).
+- `POST /admin/api/whatsapp/access` (e o formulario Add phone do console) valida `identity` com a MESMA regra da CLI, agora no gateway (`whatsapp_linked::numero`): `+` e codigo do pais obrigatorios (formatos BR/US aceitos), 6 a 15 digitos, ou `<digitos>@lid`; entrada invalida da 400 com `error` e `error_code` estavel. Antes a API aceitava numero sem `+`, sem como saber se o codigo do pais veio — e um numero gravado sem ele nunca casa com o remetente (#1403).
+- Matriz por principal (`garraia whatsapp access`, `GET /admin/api/whatsapp/access`, pagina WhatsApp Access): ganha as colunas `web` (`web_fetch`), `memory_read` e `memory_write` (pela classe `memory.*`; hoje nenhuma ferramenta nativa a carrega, e por isso a coluna e falsa no piso `search`, que nao a nomeia), ao lado de arquivos, MCP, shell, dispositivos e mensagem — o minimo que a #1411 pede (#1411).
+- **`garraia whatsapp allow`, `remove`, `owner` e `unowner` passam a auditar
+  (#1414; ADR 0025).** Os comandos legados gravavam `allow`/`owners` no
+  `config.yml` sem deixar rastro, e a trilha de `access audit` so contava as
+  mutacoes novas (`level`, `write`, `block`, `open`...). Agora cada escrita
+  que de fato mudou algo vai para o mesmo `<data_dir>/audit/whatsapp-access.jsonl`,
+  com o nome do subcomando como acao (`allow`, `remove`, `owner`, `unowner`;
+  `allow --owner` e `allow`, e e o resumo `depois` que diz que o alvo entrou
+  como dono), origem `cli`, o usuario do SO como ator e o alvo mascarado
+  (`...1234`) — nunca a identidade inteira, chave ou mensagem. Repeticao
+  idempotente (autorizar quem ja estava, remover quem nao estava) nao gera
+  evento. O passo pos-QR do `link`, que e a mesma escrita do `allow`, audita
+  do mesmo jeito. Mudanca gravada com o audit indisponivel sai 73, como nos
+  comandos novos; no `link` o exit continua 0 (o vinculo valeu) e o aviso sai
+  em stderr.
+- **`garra_status` diz se as file tools tem raiz nesta sessao (#1416, #1418).**
+  O relatorio ganha o bloco `file_tools` — `ready` (bool), `source`
+  (`session_workspace` | `session_working_dir` | `declared` | `none`), `roots`
+  (contagem, so quando declaradas) e `means` (so quando `ready = false`: a
+  frase que o modelo deve dizer em vez de prometer ler arquivo). Sem caminho
+  nenhum, por isso sai inteiro tambem no turno restrito do WhatsApp, onde
+  `session.working_dir` e retido. O resolvedor e o mesmo do boot e do
+  `/api/diagnostics` (`raizes_das_file_tools`): so le metadado.
+- Registro de capacidades (`garra_status`, `/api/diagnostics`, `GET /admin/api/capabilities`): `file_read`, `file_write` e `list_dir` numa sessao sem raiz nenhuma saem como `unavailable` com `reason_code: no_roots`, e `repo_search` sem repositorio como `no_repository`, os dois com a remediacao `/project <nome>` — falta de contexto e um estado distinto de negada pela politica (que continua vencendo) e de nao configurada (#1416, #1381, #1387).
+- **Ferramenta registrada mas nao operacional fica fora da lista chamavel
+  do modelo (#1425, opcao B; #1418).** `Tool::disponibilidade()` diz se a
+  ferramenta esta utilizavel AGORA; o runtime consulta isso ao montar a
+  lista de cada turno (junto com o portao de nome e classe) e antes de
+  despachar: se o modelo pedir pelo nome uma ferramenta indisponivel, ela
+  nao roda e a explicacao volta como resultado de ferramenta, com codigo
+  (`not_configured`, `channel_offline`, ...) e motivo, distinta de "negada
+  pela politica". `telegram_send` e a primeira a usar: so e chamavel com o
+  Telegram configurado na config viva e conectado; desligar o canal na
+  config tira a tool na mensagem seguinte, sem restart. `NoRoots` das file
+  tools ganha mensagem propria e acionavel — "nenhuma raiz esta configurada
+  para esta sessao ... selecione um projeto com `/project <nome>` ou
+  configure `agent.file_roots`" — em vez da recusa generica de caminho
+  fora das raizes (que continua identica para "fora" e "nao resolveu",
+  sem oraculo de existencia).
+- **O `garra whatsapp link` termina mostrando a politica de acesso em vigor (#1429).**
+  O wizard fechava com "pronto para receber mensagens" sem dizer quem, afinal, podia
+  falar com o GarraIA por aquele WhatsApp: as contagens so apareciam no meio do
+  fluxo, e quem acabara de parear (ou de re-vincular um aparelho com `allow` herdado)
+  saia sem ver o portao. Agora, antes da linha final, ele imprime o MESMO resumo do
+  `garra whatsapp access` — canal, perfil de execucao, admissao, default do
+  desconhecido, grupos, contagens e cada principal com piso, nivel e o que pode de
+  fato, identidades so pelos quatro ultimos digitos, nunca o numero inteiro. E a
+  mesma funcao de formatacao da outra tela, e nao uma segunda copia; com o portao
+  vazio o aviso de "ninguem autorizado" sai uma vez so, como linha final.
+- **O runbook de release ganha um gate de dogfood manual antes do tag
+  (#1439).** `docs/releasing.md` §1.5 fixa a matriz que alguem com maquina e
+  telefone executa contra o candidato — instalacao limpa nos dois
+  instaladores, WhatsApp de ponta a ponta, restart sem QR, `update` e
+  `rollback`, os bundles do desktop, isolamento do workspace por sessao e
+  diagnostico sem aviso espurio — com data, sistema e executor registrados no
+  corpo da PR de release. Linha sem data, release nao sai. E a resposta ao
+  padrao das v0.4.4/v0.4.5, verdes no CI e quebradas no caminho real; a
+  automacao do que da para automatizar segue na #1426.
+- **iMessage: o campo da sala chama-se `room_id` (#1461).** Ele sempre foi
+  `message.cache_roomnames` do `chat.db` (`chat<digitos>`, o identificador que
+  o servidor gera e que iguala `chat.chat_identifier`), nunca o
+  `chat.display_name` que os participantes renomeiam — mas chamava-se
+  `group_name`, e foi esse nome que fez uma revisao de seguranca ler
+  "texto livre renomeavel" onde ha um id estavel. Rename puro, sem mudanca de
+  comportamento; o doc do campo diz o que ele e e o que nao e.
+- **Instalacao limpa nao nasce com aviso espurio no `/api/diagnostics`
+  (#1471).** `tools.bash` com `agent.sandbox.mode = off` — o default
+  documentado do perfil `standard` — passa de `warning` a `not_configured`,
+  com o mesmo passo de como ligar o sandbox (fora de unix, idem); sandbox
+  configurado e inutilizavel (sem binario, sem backend, ssh, tool elevada ou
+  fora da allowlist) continua `warning`. `runtime.channels` sem canal de
+  mensageria passa de `warning` a `not_configured`: chat web, CLI e API nao
+  entram no registry de canais e o WhatsApp vinculado tem a linha
+  `whatsapp.linked`; o passo antigo mandava procurar erro de registro de um
+  canal `web` que nunca existiu ali, e o novo diz como declarar um canal.
+- **Quality Ratchet: `runtime.rs` volta para baixo da baseline (#1254, plan
+  0064).** O `mod tests` de `crates/garraia-agents/src/runtime.rs` (6 763 das
+  10 881 linhas, o maior `.rs` do repositorio) vira `runtime/tests/`, um
+  arquivo por tema com ate ~530 linhas — nao um `runtime_tests.rs` unico,
+  porque o ratchet conta todo `.rs` rastreado e tambem quantos passam de
+  700/1500/2500 linhas. Os submodulos aninhados viram arquivos irmaos sem
+  mudar de caminho; helpers ficam `pub(super)` no tema que os criou. As tres
+  guardas que varrem o fonte leem agora um `runtime.rs` que e so producao. O
+  mesmo para `tools/repo_search_tool.rs` (840 → 433, testes em
+  `repo_search_tool/tests.rs`) e para o smoke `tests/whatsapp_smoke.rs` da
+  CLI (822 → 418 + `whatsapp_smoke_acesso.rs`), os dois que tinham cruzado as
+  700 linhas desde a baseline. `max_file_lines` 10 881 → 6 901 e
+  `files_over_700` 114 → 112; `files_over_1500`/`_2500` seguem um acima da
+  baseline por `garraia-cli/src/whatsapp/acesso.rs` (1 650) e
+  `garraia-cli/src/whatsapp/tests.rs` (3 726), registrados para decisao.
+
+### Fixed
+- **Sessao sem projeto ganha um workspace seguro em vez de nenhuma raiz (#1378).** Uma
+  sessao do WhatsApp recem-vinculada nasce com `working_dir = null`. Com
+  `agent.file_roots` vazio — o default de toda instalacao limpa — o conjunto de raizes
+  do jail das file tools ficava vazio, e vazio significa negar tudo (#1244): `file_read`,
+  `file_write` e `list_dir` apareciam registradas, o modo as anunciava, e toda chamada
+  voltava recusada. A capability existia no papel e nao existia na pratica. Agora, quando
+  nada foi declarado, a raiz default e `<data_dir>/workspace/<sessao>` — um subdiretorio
+  **por sessao** dentro do endereco que o ADR 0024 ja nomeia como o workspace do proprio
+  Garra —, igual nos dois perfis de execucao:
+  `execution.pod_root` muda so a raiz do servidor MCP `filesystem` e **nao** e herdado
+  pelas file tools nativas. O boot cria esse diretorio — e **so** ele: uma raiz
+  declarada com typo continua nao sendo materializada, para nao plantar diretorio no host
+  por efeito colateral da subida. **Nunca** `/` e **nunca** o `$HOME`: um caminho mais
+  largo segue sendo escolha explicita do operador. Nada muda para quem declarou raiz em
+  `agent.file_roots` ou em `GARRAIA_FILE_ROOTS` — a declaracao vence e o default nem e
+  consultado —, caminho fora da raiz continua recusado com a mesma mensagem unica, e se
+  o workspace nao puder ser criado o jail volta ao fail-closed anterior, com aviso no
+  boot. O `/api/diagnostics` passou a trazer a linha `files.workspace`, que diz qual e o
+  workspace efetivo e **por que** ele e esse (declaracao do operador, workspace padrao,
+  ou nenhuma raiz). O workspace novo nasce `0700` (so o dono), um symlink plantado no
+  lugar dele e recusado em vez de seguido — senao o jail herdaria o alvo do link, que
+  poderia ser justamente `/` ou o `$HOME` —, e a linha do `/api/diagnostics` relativiza
+  o caminho tambem quando o `data_dir` passa por symlink, onde antes ela caia no
+  fallback e imprimia o caminho absoluto do host numa rota auth-free. Vale notar que
+  este default tambem passa a alcancar a `RunTestsTool`: a combinacao `file_write` +
+  `run_tests` que a #1272 (SANDBOX-1) marca como adjacente ao shell do host agora tem
+  um diretorio onde operar, dentro do jail.
+
+  **O workspace padrao e isolado por sessao (#1449).** A primeira versao desta correcao
+  punha `<data_dir>/workspace` como raiz **fixa** do jail, e raiz fixa e a mesma para
+  toda sessao, canal e principal: um contato do WhatsApp escrevia ali e o turno de outro
+  lia. Isso e disclosure cross-principal, e tambem um vetor persistente de injecao
+  indireta — conteudo escrito por um principal voltando no contexto de outro sem passar
+  pelo guard de entrada. Agora o workspace padrao nao e raiz do jail: ele e o **pai** de
+  um subdiretorio por sessao, e e esse subdiretorio que entra como `working_dir` da
+  chamada, pelo mesmo mecanismo (`session_dir`) que uma sessao com projeto ja usava desde
+  a #1244. No caso "workspace padrao" o jail fica literalmente sem raiz fixa, entao a
+  sessao A nao tem como alcancar o diretorio da sessao B — nem o pai, que enumeraria as
+  sessoes existentes. O nome do subdiretorio e um hash do identificador da sessao, e nao
+  o identificador: hashear e o que impede tanto `..`/separador de caminho vindos de um id
+  nao confiavel quanto gravar em disco (e no log) um identificador que no WhatsApp e o
+  contato. O diretorio de cada sessao nasce preguicosamente, fecha em `0700`, e recusa
+  symlink no lugar dele — inclusive no pai, verificado de novo no momento do uso —, caindo
+  no mesmo fail-closed de sempre em vez de herdar o alvo do link. Raiz declarada em
+  `agent.file_roots`/`GARRAIA_FILE_ROOTS` continua vencendo sozinha, **sem** escopo por
+  sessao: um diretorio compartilhado ali e escolha explicita do operador. A linha
+  `files.workspace` do `/api/diagnostics` passa a mostrar `<data_dir>/workspace/<sessao>`,
+  sem nunca publicar o identificador da sessao.
+
+  O `working_dir` sintetizado alcanca toda invocacao de ferramenta, nao so as quatro file
+  tools: `bash` (sandboxed), `git_diff`, `code_review` e `repo_search` tambem passam a
+  operar dentro do diretorio da sessao. No `bash` sandboxed isso troca a recusa
+  fail-closed de antes (mount vazio sem `working_dir`, #1272 SANDBOX-2/5) por execucao
+  de verdade dentro de um diretorio novo e vazio; fora do sandbox, e nas outras tres
+  tools, o efeito e estritamente mais estreito — antes caiam no CWD do processo do
+  gateway, que expunha o checkout onde o gateway roda.
+- **`repo_search` recusa na hora quando nao ha repositorio ativo (#1380).** Sem
+  `working_dir` a busca herdava o diretorio do processo e varria a arvore inteira ate
+  estourar o timeout de 15s, para no fim nao responder nada util — o caso da sessao
+  remota sem projeto selecionado, em que o diretorio do processo e `/`, o `$HOME` ou o
+  diretorio de dados. Agora a tool usa o `RepoDir::decidir` para separar os dois
+  sentidos de "sem working_dir": o diretorio herdado que E (ou esta dentro de) um
+  repositorio segue sendo buscado, como no `garra chat` local; sem `.git`/`.hg`/`.svn`/
+  `.jj` nele ou acima dele, a resposta sai em milissegundos, dizendo onde a tool olhou
+  e que basta selecionar um projeto. Sessao que escolheu um `working_dir` nao muda de
+  comportamento. Num turno restrito (o piso `search` dos canais remotos, o mesmo em que
+  o `garra_status` retem `session.working_dir`) a recusa nao cita o caminho do host; o
+  operador local continua vendo onde a tool olhou, porque ali o caminho e acionavel.
+  Para isso o runtime passou a publicar o bit de "turno restrito" para toda ferramenta,
+  e nao so para o `garra_status`. Mudanca de
+  comportamento: uma arvore de codigo SEM metadado de VCS no diretorio do processo (por
+  exemplo um `COPY` de container ou um tarball exportado) era buscavel e agora recebe a
+  recusa — selecione o projeto (defina o `working_dir` da sessao) para buscar nela.
+- **`garra_status` explica o que `withheld` significa (#1382, #1387).** O relatorio
+  ja retinha o que so interessa ao operador num turno restrito e listava os campos
+  retidos em `withheld`, mas nada dizia ao modelo como ler isso: um campo retido sai
+  `null`, e com `mcp_servers: null` o modelo respondia que este Garra nao tem MCP. A
+  `description()` da tool e o proprio relatorio (campo `withheld_means`, presente so
+  quando ha algo retido) agora dizem que campo citado em `withheld` esta OCULTO POR
+  POLITICA desta conversa, e nunca deve ser lido como capacidade ausente, desligada ou
+  nao suportada. O texto tambem nao afirma o contrario: `withheld` e lista fixa, entao
+  o `null` significa apenas "nao divulgado nesta conversa" e nao prova que o recurso
+  exista. A nota de sistema que acompanha a tool (`NOTA_GARRA_STATUS_PT`/`EN`, no
+  `runtime.rs`) carregava a mesma afirmacao na forma curta ("e nao esta ausente") e foi
+  corrigida junto, para que prompt e relatorio nao digam coisas diferentes sobre o mesmo
+  campo. Nenhum dado novo e exposto: e so honestidade de texto sobre o que o relatorio
+  ja fazia.
+- **`garra whatsapp allow '*'` diz por que nao vale (#1389).** O curinga caia no
+  erro generico de caractere ("o numero so pode ter digitos"), que faz um recurso
+  inexistente parecer erro de digitacao. Agora ha uma variante propria: a mensagem
+  explica que este canal nao tem "autorizar todo mundo" e que o portao e
+  fail-closed, identidade a identidade. O exit code segue 65 e a semantica de
+  acesso aberto continua NAO implementada.
+- WhatsApp pessoal: ligar ou desligar os grupos pela secao `access` (`garraia whatsapp access groups on/off`, console) passa a valer na mensagem seguinte, nos dois sentidos — o filtro de grupo usava os settings do boot, entao ligar so valia depois de um restart e desligar a quente nao impedia o turno do grupo. Testes ponta a ponta provam tambem que mensagens concorrentes a trocas de politica viram turno ou recusa uma vez so, sem janela de portao aberto, que promover/rebaixar/remover valem na mensagem seguinte e que no grupo manda a politica do grupo, nunca o nivel de quem fala (#1412, #1423).
+- **`garraia stop` nao trata mais um zumbi como processo vivo (#1426).**
+  Achado pelo dogfood em container limpo: quando o pai do daemon nao colhe
+  filhos (um container cujo PID 1 e `sleep`, um `docker exec` sem
+  `--init`), o gateway encerrava limpo no SIGTERM — o `garraia.log` termina
+  em "gateway shut down gracefully" — mas virava zumbi, e `kill(pid, 0)`
+  continuava devolvendo 0. O `stop` entao esperava os 5 s de graca, mandava
+  SIGKILL e anunciava "survived SIGTERM and SIGKILL" de um processo ja
+  morto. No Linux, `is_process_running` agora le o estado em
+  `/proc/<pid>/stat` e um `Z` conta como parado; fora do Linux o
+  comportamento e o de sempre. Teste de unidade forka um filho, espera ele
+  virar zumbi de fato e exige `false`.
+- **Diagnostics separa "nunca configurado" de "quebrado" (#1437).** O
+  `GET /api/diagnostics` tinha quatro estados (`ok`/`warning`/`error`/`skipped`)
+  e um subsistema opcional que o operador nunca montou saia igual a um
+  subsistema montado e falhando: uma instalacao local recem-feita acendia
+  amarelo por TLS ausente, por `.env` inexistente e por um `GARRAIA_JWT_SECRET`
+  que o proprio texto da linha chamava de opcional. Entram duas variantes
+  **aditivas** — `disabled` (ha um interruptor e ele esta desligado: modo voz)
+  e `not_configured` (subsistema opcional que esta instalacao nunca montou:
+  TLS, `.env`, secret de JWT, tokens de Telegram/Discord, aparelho de WhatsApp
+  vinculado). As quatro originais mantem nome e significado, e as tres neutras
+  (`skipped`, `disabled`, `not_configured`) nunca tiram o agregado do relatorio
+  de `ok`. O console mostra as neutras em cinza, com o estado por extenso ao
+  lado do rotulo, e trata status desconhecido como neutro — nunca como erro.
+- **`cargo clippy -D warnings` limpo no stable 1.95 (#1447).** Duas
+  expressoes booleanas pre-existentes disparavam `clippy::nonminimal_bool`
+  a partir do rustc 1.95: o predicado de `retain` em
+  `whatsapp_linked.rs` (De Morgan) e uma asserção de teste em
+  `safety_gate.rs` (`!x.is_ok()` → `x.is_err()`). Sem mudanca de
+  comportamento; nenhum `#[allow(...)]` novo.
+- **Hook `pre-tool-use` deixa de bloquear toda remocao por caminho (#1453).**
+  Os padroes `rm -rf /`, `rm -rf ~` e `rm -rf ./` eram casados como substring
+  literal, entao `rm -rf /tmp/scratchpad/x` e `rm -rf ./pintest` — limpezas
+  legitimas de uma rodada autonoma — caiam como "comando perigoso". O `rm`
+  passa a ser julgado por uma regex ancorada no ALVO: raiz, home (`~`,
+  `$HOME`), diretorio atual e pai, sozinhos ou com glob, precedidos de
+  qualquer flag (`-rf`, `-r -f`, `--`) e de `sudo`/`xargs`/`&&`. Um caminho
+  DENTRO desses diretorios nao casa. Os demais padroes literais (fork bomb,
+  `DROP TABLE`, force push em `main`, `dd if=`, `mkfs.`) continuam iguais, e
+  `scripts/test-hooks.sh` ganha os casos dos dois lados.
+- **CI volta a subir o MinIO sem depender de registry (#1458).** O Docker Hub
+  removeu `minio/minio` (#1230), o quay.io passou a exigir login para toda tag
+  em 2026-09-24 e o `dl.min.io` responde 410 — o check obrigatorio `Clippy
+  Linting` falhava no `docker pull` em toda PR, e o retry do #1457 nao tinha
+  como ajudar. Agora `scripts/ci/build-minio-image.sh` compila o `minio` a
+  partir da tag upstream fixada (`RELEASE.2025-02-28T09-55-16Z`, commit
+  conferido antes do build, tag movida e recusada), embala em
+  `debian:bookworm-slim` e etiqueta a imagem com o `nome:tag` que o
+  testcontainer procura — que so faz pull quando a imagem nao existe
+  localmente. O binario compilado fica no cache do Actions por tag, entao so
+  o primeiro run depois de um bump paga o build. O `docker-compose.minio.yml`
+  de dev usa o mesmo script e deixa de depender da imagem do `mc`, tambem
+  fechada: o bucket passa a ser criado com o `aws-cli`.
+- **As raizes das file tools sao resolvidas uma vez, no boot (#1459).** O
+  `/api/diagnostics` (rota auth-free) e o `garra_status` chamavam
+  `raizes_das_file_tools` a cada request/chamada: um `canonicalize` por raiz
+  declarada e um `warn!` por raiz que nao resolve, amplificaveis por quem
+  quisesse. Agora o `AppState` guarda o resultado calculado na subida, da
+  mesma config e pela mesma funcao que monta o jail, e as duas superficies
+  leem dele — descrevendo o jail que o turno usa, e nao o disco do momento.
+  Guardas de fonte impedem a volta do padrao.
+- **O workspace padrao e o diretorio de cada sessao nascem fechados em `0700`
+  no proprio `mkdir` (#1463).** Antes o diretorio era criado com a umask do
+  processo (tipicamente `0755`) e so depois fechado por `set_permissions`, com
+  uma janela em que qualquer usuario local o lia; e o `create_dir_all` seguia
+  um symlink plantado no proprio caminho. Agora a criacao e de um componente
+  so, ja com o modo certo, e um link no caminho faz o `mkdir` falhar em vez de
+  ser seguido. A sequencia symlink → nao-diretorio → mkdir passa a existir uma
+  unica vez, em `SessionWorkspace::garantir_raiz`, chamada pelo boot do
+  gateway (para `<data_dir>/workspace`) e pelo turno (para o subdiretorio da
+  sessao), em vez de duas copias que podiam divergir (#1460). O boot cria o
+  `data_dir` antes, porque numa instalacao limpa ele ainda nao existe nesse
+  ponto. A guarda de fonte que exige um unico ponto de montagem de
+  `ToolContext` em `runtime.rs` passa a casar o construtor em qualquer forma
+  (numa linha so, com caminho de modulo, com `..base`), e nao so a linha exata
+  `ToolContext {` (#1464).
+- WhatsApp pessoal: `access.groups.enabled: false` escrito a mao na config passa a VENCER o `reply_in_groups: true` legado (antes o legado ganhava em silencio e o canal seguia respondendo em grupo, sem teto); a precedencia gera aviso no boot/`config check` e esta na ADR 0025 (#1501).
+- **`garra mcp-server` volta a entregar as tools ao Claude Code (#1518).** Quem
+  negocia a spec MCP `2026-07-28` (o Claude Code, via `server/discover`) valida
+  o `tools/list` contra o schema novo, que torna `ttlMs` e `cacheScope`
+  obrigatorios (SEP-2549). O rmcp 3.x (#1162) modela os dois como `Option` e o
+  `ListToolsResult::with_all_items` os deixa fora do fio, entao o cliente
+  recusava a lista inteira ("Invalid result for tools/list") e o `/mcp`
+  mostrava o servidor conectado, mas sem nenhuma tool. O handler agora manda
+  `ttlMs: 0` e `cacheScope: "private"` quando a versao negociada e
+  `2026-07-28` ou mais nova; peer legado segue recebendo o `tools/list` de
+  antes, byte a byte.
+- **`codeql-rekey-ledger.py` casa a linha do sink dentro do span do alerta.** O
+  CodeQL reporta o span do statement (`start_line`..`end_line`) e o ledger
+  ancora a linha do sink, que num `println!` multi-linha e a ultima do span; o
+  rekey comparava `start_line` exato e deixava a duplicata aberta como "sem
+  entrada" — foi o que manteve o alerta #176 (mesmo sink do #173 dispensado,
+  `garra whatsapp link`) aberto desde a v0.4.5. Agora a regra e a mesma do
+  `codeql-reapply-dismissals.sh`, com testes, e o ledger reaponta #173 → #176.
+
+### Security
+- **Ferramenta MCP nao vira mais slash command, que era bypass do ToolGate (#1386).**
+  O boot registrava um comando `/mcp_<tool>` por ferramenta MCP conectada, e o
+  fechamento desse comando chamava `McpManager::call_tool` direto — sem
+  `ToolGate`, sem o modo da sessao, sem `ToolApproval` e sem `HardwareGate`. O
+  unico controle era o `Role::User` do comando, que todo mundo tem: uma sessao
+  criada em modo `search` (read-only) executava ferramenta de mutacao por
+  `POST /api/sessions/{id}/messages`, e `GET /api/slash-commands` listava os
+  nomes de graca. O caminho legitimo nao muda — as ferramentas MCP continuam
+  chegando ao modelo pelo `AgentRuntime`, despachadas atras do `ToolGate`.
+- **Leitura de sessao por id separada em cliente e operador (#1462, opcao 3).**
+  `GET /api/sessions/{id}/history` devolvia o historico verbatim de qualquer
+  sessao em memoria — e a de um canal esta em memoria no caso normal, porque
+  a hidratacao do canal a poe la —, numa rota `/api/*` auth-free por padrao,
+  sem LLM no meio e com ids adivinhaveis por construcao. Agora a leitura de
+  **cliente** por id (`GET /api/sessions`, `GET /api/sessions/{id}/history`,
+  `DELETE /api/sessions/{id}` e o `resume` sem token do `/ws`) so alcanca
+  sessao das superficies locais do operador (`api`, `vscode`, `web`,
+  `parrot`), como a escrita ja fazia desde a PR #1468, e a regra mora num
+  lugar so (`AppState::sessao_da_api`): sessao de canal ou do mobile responde
+  o mesmo `404 session not found` de id inexistente, byte a byte, e nao e
+  hidratada, desconectada nem listada — em memoria e no `sessions.db`. A
+  leitura do **operador** ganha `GET /admin/api/sessions/{id}/history`
+  (cookie do `/admin` + `manage_sessions`; `viewer` recebe 403), que le
+  qualquer sessao, em memoria ou so no disco, sem hidratar — a hidratacao
+  reescreveria a linha do canal — e registra cada leitura na auditoria. O
+  Export da pagina Sessions do Web Console passa a usar essa rota (e a
+  listagem administrativa) quando o navegador esta logado no `/admin`; sem
+  login, mostra so as sessoes locais e diz onde entrar. O historico do mobile
+  (`GET /chat/history`) continua vindo do `sub` do JWT — cada usuario le so a
+  propria sessao.
+- **Um `session_id` escolhido pelo cliente deixa de alcancar a sessao de
+  outra superficie (#1462).** `POST /v1/chat/completions` aceitava
+  `X-Session-Id` verbatim e `POST /api/sessions/{id}/messages` aceitava o id
+  no caminho, e nenhum dos dois conferia de quem era a sessao: um id forjado
+  — `whatsapp-linked-<numero>`, `telegram-<chat>`, adivinhaveis por
+  construcao — hidratava a conversa da vitima (resumo + ate 100 turnos) para
+  dentro do request do atacante e gravava o turno dele na conversa dela. Por
+  id, agora so se alcanca sessao das superficies locais do operador (`api`,
+  `vscode`, `web`, `parrot`); sessao de canal com humano do outro lado ou do
+  mobile responde `404 session not found` sem confirmar que existe, e nao e
+  hidratada nem escrita. (A leitura por id, `GET /api/sessions/{id}/history`,
+  foi fechada em seguida pela opcao 3 — ver o item irmao desta secao.)
+- **`/api/diagnostics` nao publica mais caminho absoluto do host para raiz
+  do MCP `filesystem` fora do `data_dir` (#1465).** As linhas
+  `execution.profile` (em `isolated-pod`) e `mcp.filesystem_root` caiam no
+  fallback que imprimia o caminho como esta — no caso legado mais comum, o
+  `$HOME` do host com o nome de usuario — numa rota auth-free. Agora uma raiz
+  fora do `data_dir` sai so como contagem (`1 fora do data_dir`), e a raiz
+  ofensora e apontada pela posicao na lista do servidor (`raiz #2 do servidor
+  filesystem`), nunca pelo caminho; e a mesma regra que `files.workspace` ja
+  aplicava a raiz declarada. O caminho continua no `mcp.json`/`config.yml` e
+  no log de boot.
+- **Chamadas MCP de filesystem confinadas ao jail da sessao (#1482, nucleo da
+  #1383).** Em `standard` a raiz do servidor `filesystem` autoprovisionado e
+  `<data_dir>/workspace`, o pai de todo diretorio de sessao (#1449); com a
+  leitura MCP liberada no piso `search` (#1384), um contato admitido listava
+  o pai e lia o que o agente escreveu para outra pessoa. Agora `McpTool`
+  passa `path`/`paths`/`source`/`destination` das operacoes de filesystem pelo
+  MESMO `FileJail` das file tools nativas, com o `working_dir` da sessao;
+  caminho relativo resolve contra o diretorio da sessao; fora do jail a recusa
+  e a frase unica das tools nativas; `list_allowed_directories` responde as
+  raizes efetivas da sessao sem chamar o servidor. O gateway entrega o jail ao
+  `McpManager` no boot (guarda de fonte); a CLI local segue sem jail.
+- Ledger CodeQL (`docs/security/codeql-suppressions.{md,json}`): a entrada do alerta #174 (`rust/path-injection`, `bridge.rs:639`, caminho sob o diretorio da ponte derivado do `data_dir` da config) passa a ser o #179 — o GitHub fechou o #174 como fixed quando o sink mudou de linha e abriu o #179 no mesmo lugar; justificativa preservada e re-conferida no SARIF, sem supressao nova.
+- **`mascarar_numeros_longos` agora cobre telefone com separador comum (#1514).**
+  A funcao que o `RedactingWriter` usa para mascarar PII em log so contava
+  sequencia **contigua** de 10+ digitos: um telefone com espaco, hifen ou
+  parenteses (`"55 11 98765 4321"`, `"55-11-98765-4321"`,
+  `"+55 (11) 98765-4321"`, o celular BR com o nono digito separado
+  (`"55 11 9 8765 4321"`) e o celular NANP com DDI separado
+  (`"+1 555 123 4567"`) atravessava inteiro. Achado por um `test-engineer`
+  durante a revisao independente do PR de #1513. A ponte entre grupos exige
+  que o grupo ancora nao esteja colado a letra nem seja parte de um UUID,
+  rejeita grupo colado a letra do outro lado, para de crescer assim que o
+  total ja basta, exige que ao menos um grupo tenha 4+ digitos, e recusa —
+  so depois de a ponte parar de crescer, avaliando os grupos completos —
+  intervalo numerico (`"100000-200000"`) e numero com separador de milhar
+  (`"1 234 567 890"`). Para na hora se o trecho ja fechado for uma data
+  (`AAAA-MM-DD`, a forma que o `CLAUDE.md` manda usar em prosa narrativa, ou
+  `DD-MM-AAAA`), a menos que a ponte, espiando adiante ate o que resta do
+  teto de grupos, alcance um grupo de 4+ digitos que complete um telefone
+  plausivel (`"55-11-98-76-5432"`).
+  Revisado em tres rodadas por `code-reviewer` e `security-auditor`
+  independentes: a primeira versao publicada tinha uma regressao na
+  protecao de UUID e nao cobria os formatos de celular BR/NANP mais comuns;
+  a segunda corrigiu isso mas criou uma regressao nova (apagava todo
+  celular NANP) e nao fechava de vez o bypass por prefixo de data; a
+  terceira corrigiu ambos e recebeu veredito MERGE_READY (risco R1), com
+  duas limitacoes residuais aceitas e documentadas em codigo: um numero
+  real cujos grupos apos o primeiro sejam todos de exatamente 3 digitos
+  ainda escapa (indistinguivel de numero com separador de milhar sem
+  contexto semantico), e uma combinacao especifica de data + numero curto +
+  grupo de 4+ digitos pode ser sobre-mascarada (nunca vaza, so reduz
+  legibilidade de log). Nao cobre numero partido entre duas
+  `MessagePart::Text` diferentes — isso fica para quem redige o conteudo
+  agregado, fora do escopo desta funcao.
+
 ## [0.4.5] - 2026-09-22
 
 Release que tira o `bash` irrestrito das superficies sem humano no laco e faz

@@ -5,12 +5,58 @@ Status operacional do backlog do GarraIA/GarraRUST. Este arquivo complementa
 foi concluído, o que ficou parcial ou adiado, decisões tomadas e próximos passos
 curtos para a próxima sessão autônoma.
 
-**Atualizado:** 2026-09-26 (America/New_York)
+**Atualizado:** 2026-09-27 (America/New_York)
 
 > O Linear foi descontinuado em 2026-08-18; o planejamento vive no tracker
 > interno. Menções a "Done in Linear", "In Review" ou "issues Linear" nas seções
 > históricas abaixo são registro da época, não estado atual. IDs `GAR-xxx`
 > permanecem como identificadores históricos.
+
+## Fechamento da v0.4.6 — 2026-09-27
+
+O branch `release/v0.4.6` havia sido cortado em 2026-09-25 e a `main` seguiu com
+**114 commits** depois disso (o trem #1510 e a PR #1519). Ninguém juntou os dois,
+então a `main` continuava em `0.4.5` e não existia tag. Esta rodada fechou isso.
+
+- **Merge do branch de release** com o que era único dele: bump 0.4.6 (workspace,
+  `Cargo.lock`, Garra Mobile `0.4.6+10`), plans 0363/0364/0365 e as páginas de
+  wiki. O fix de MCP do branch (#1518, PR #1520) era **idêntico** ao que a `main`
+  já tinha pela PR #1519.
+- **CHANGELOG remontado dos 60 fragmentos.** A seção `[0.4.6]` do branch vinha de
+  **18** e estava obsoleta: os fragmentos de #1429 e #1462 foram **reescritos** na
+  `main` depois do corte, então o texto do branch contradiria o código. Prosa de
+  abertura nova, cobrindo Access Policy v2, registro de capacidades, classes de
+  capacidade, circuit breaker, jail único do MCP `filesystem` e `POST /mcp`.
+- **Wiki reescrita e páginas permanentes atualizadas** (CLI, Configuração,
+  Segurança, Integração, ADRs, Home). As páginas v0.4.6 do branch afirmavam três
+  coisas já falsas: que a leitura `GET /api/sessions/{id}/history` ficava como
+  estava, que a #1429 era parcial, e que os dois avisos espúrios do
+  `/api/diagnostics` eram limite conhecido.
+- **Docs de release**: `ROADMAP.md` (a linha de release descrevia só a
+  estabilização), `CLAUDE.md` (dizia "24 ADRs" com a 0025 já aceita), os dois
+  READMEs (descreviam o WhatsApp pelo modelo `allow`/`owners` sem citar a v2) e
+  `plans/README.md` (0365 ausente, 0364 marcada como parada no gate).
+- **Higiene de branches**: de 8 para 2. Quatro estavam **100% mergeadas**
+  (`feat/1431`, `feat/1436`, `feat/1438`, `fix/playwright-sessoes-vazias`) e duas
+  eram cabeça de PR **fechada por decisão** — `fix/1452-pin-toolchain` (o
+  `rust-toolchain.toml` quebra o cross-compile do CI; a #1452 saiu pelo
+  `scripts/setup-toolchain.sh`) e `fix/1456-minio-pull-retry` (401 sustentado não
+  cede a backoff; a #1458 passou a construir a imagem do fonte). O motivo de cada
+  uma ficou registrado nas PRs #1454 e #1457, com o SHA para recuperação.
+- **Gate de dogfood D1/D9 (Linux) executado contra o candidato e PASSOU** —
+  `scripts/dogfood/linux-clean-install.sh --source local`, 13 passos, `.deb`
+  `0.4.6` num `ubuntu:24.04` cru, resposta real do modelo, sobrevivência ao
+  `restart`. D2/D4/D5/D6 e o trecho WhatsApp de D1/D3 seguem **pendentes do dono**
+  (telefone, Windows, sessão gráfica).
+
+### Fica aberto, com bloqueio nomeado
+
+| Item | Bloqueio |
+| --- | --- |
+| #1433, #1434, #1435 | decisão de escopo do dono: milestone v0.4.7, implementar só a #1434, ou fechar. Não são bloqueio de release |
+| Linhas D2/D4/D5/D6 do dogfood | telefone, máquina Windows e sessão gráfica — só o dono |
+| Instaladores assinados | sem certificado Windows e sem Apple Developer ID no projeto |
+| `mcp.servers` na instalação limpa | `filesystem retrying (causa: other)` não diz que **falta Node**; higiene na linha da #1437, candidata a issue pós-release |
 
 ## Concluído em 2026-09-26 — trem v0.4.6: acesso ao WhatsApp de ponta a ponta, honestidade do runtime e dogfood
 
@@ -74,6 +120,41 @@ para que o GitHub marque cada uma como merged com um único ciclo de CI.
 | #1436 | Página + `PATCH /admin/api/retention` do console (a fatia de dados já delega para os mesmos achados) |
 | #1438 | Endpoint autenticado que expõe o snapshot do registro |
 | #1428 | Cenários comportamentais com modelo real — linha D10 do gate, manual por design |
+## Concluído em 2026-09-25 — release v0.4.6: estabilização (CI sem registry, workspace por sessão, X-Session-Id)
+
+Pré-voo, inventário das 64 issues e diário de execução em
+[`plans/0364-release-v0.4.6-preflight.md`](plans/0364-release-v0.4.6-preflight.md).
+
+- **CI destravado** (#1458 via #1466): o quay.io passou a exigir login em
+  2026-09-24 e o check obrigatório `Clippy Linting` falhava em toda PR;
+  `scripts/ci/build-minio-image.sh` constrói a imagem do MinIO do fonte da tag
+  fixada, sem registry. #1456/#1457 (retry) fechadas como superadas.
+- **Workspace padrão por sessão** (#1378 via #1448; achado R4 da #1449
+  corrigido estruturalmente — a #1449 fica aberta para o "ok" do dono).
+- **`X-Session-Id` e `POST /api/sessions/{id}/messages` não alcançam sessão de
+  canal nem do mobile** (#1462 via #1468, via 1 + escrita; via 2 — leitura
+  `GET …/history` — é decisão de produto e a issue segue aberta).
+- **Hook `pre-tool-use` sem falsos positivos em `rm`** (#1453 via #1467);
+  `scripts/setup-toolchain.sh` (#1452 via #1455); gate de dogfood manual no
+  runbook (#1439 parcial via #1469).
+- **Trem de merge #1470** (#1448 #1455 #1467 #1468 #1469) depois do
+  desbloqueio, com o auto-merge da #1448 desligado — a automação cloud o
+  reativou no meio e o trem teve de absorver o head novo.
+- **Dogfood local (Linux) contra o candidato**: `config check`/`doctor` exit 0
+  numa instalação limpa, gateway `healthy`, turno real respondido via API REST
+  com Ollama local; dois avisos não acionáveis no `/api/diagnostics` viraram a
+  #1471. WhatsApp/telefone, Windows e macOS: pendentes do dono (§6 do plan).
+
+### Fica aberto, com bloqueio nomeado
+
+| Item | Bloqueio |
+| --- | --- |
+| #1449 | decisão do dono: aceitar a opção 2 (escopo por `session_id`) já implementada na #1448 |
+| #1462 | decisão de produto sobre a leitura `GET /api/sessions/{id}/history` (console × isolamento) |
+| #1461 | provável não-procede (`cache_roomnames` é o id da sala); confirmar num `chat.db` real |
+| #1390, #1429, #1387 | atendidas em parte; o restante é o épico Access Policy v2 (#1388) |
+| 43 issues de v0.5.0 | três épicos (Policy v2, Capability Registry, WhatsApp no Web Console) + onboarding desktop (plan 0363) — milestone a criar pelo dono |
+| Release | tag pelo dono depois da tabela de dogfood D1–D9 preenchida (§1.5 do runbook) |
 
 ## Concluído em 2026-09-22 — release v0.4.5: bash fail-closed, aprovação nos canais, onboarding do WhatsApp
 

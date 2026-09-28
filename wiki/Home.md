@@ -23,6 +23,14 @@ Bem-vindo à wiki pública do **GarraIA** — framework de agentes de IA em Rust
 
 ## Novidades
 
+- **[v0.4.6 — Novidades](Novidades-v0.4.6)** · **[What's New in v0.4.6 (English)](Whats-New-v0.4.6)**
+  — **Access Policy v2** (ADR 0025): quem fala com o Garra pelo WhatsApp e até
+  onde cada um vai, num motor único da CLI, da API admin e da nova página
+  *WhatsApp Access* do console; **registro de capacidades** como fonte única do
+  `garra_status`, do `/api/diagnostics` e do próprio modelo, com estado, motivo
+  e remediação; MCP `filesystem` confinado ao jail da sessão; circuit breaker
+  para ferramenta que falha em série; gateway como servidor MCP em `POST /mcp`;
+  e o gate de dogfood D1–D10 obrigatório antes de todo tag.
 - **[v0.4.5 — Novidades](Novidades-v0.4.5)** · **[What's New in v0.4.5 (English)](Whats-New-v0.4.5)**
   — `bash` só dentro de sandbox onde não há humano no laço, o "sim" a um
   pedido de confirmação aprovando em todo canal, `garraia whatsapp allow` e a

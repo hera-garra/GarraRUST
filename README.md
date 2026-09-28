@@ -379,7 +379,17 @@ personal WhatsApp by linked device: `garra whatsapp` scans a QR code, keeps
 the session encrypted on disk and runs a Node/Baileys bridge over stdio;
 needs Node.js 20+ and npm on that path only —
 [docs/whatsapp.md](docs/whatsapp.md),
-[ADR 0023](docs/adr/0023-whatsapp-dispositivo-vinculado.md)), **iMessage**
+[ADR 0023](docs/adr/0023-whatsapp-dispositivo-vinculado.md); since v0.4.6,
+who may talk to it and **how far each one goes** is
+[Access Policy v2](docs/adr/0025-classes-de-capacidade-e-politica-de-acesso-v2.md)
+— explicit admission, a declared default for strangers, a per-principal
+ceiling (`chat` · `read` · `full`, file writes separate) and a per-group
+policy, driven by one engine shared by the CLI
+(`garra whatsapp access|level|write|block|unblock|users|remove|owner|unowner`),
+the admin API and the Web Console's *WhatsApp Access* page; the level is a
+ceiling that composes with the session mode, so it only ever removes, never
+grants, and `garra doctor whatsapp` walks the whole path end to end),
+**iMessage**
 (macOS, chat.db polling + AppleScript). Also: web chat console, an
 **OpenAI-compatible API** (`/v1/chat/completions`) for VS Code
 (Continue et al.) sharing the same session history, and an

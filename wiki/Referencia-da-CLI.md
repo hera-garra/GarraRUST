@@ -37,7 +37,25 @@ O binário `garraia` (alias `garra`) concentra toda a operação. Fonte: [`crate
 | `garra whatsapp logout` | Desvincula e apaga a sessão deste aparelho |
 | `garra whatsapp restore` | Traz de volta a sessão arquivada (`session.enc.prev`) por um re-vínculo que não terminou; nunca passa por cima de sessão em uso |
 | `garraia whatsapp allow <número> [--owner] [--yes]` | Autoriza um número (com `+` e código do país) ou um LID `<id>@lid` a falar com o GarraIA pelo WhatsApp pessoal, sem precisar de terminal; vale sem reiniciar quando o gateway subiu com o canal ligado e com o `config.yml` no disco (#1345). Exit 64 para `--owner` fora de `isolated-pod` ou num pipe sem `--yes`, 65 para número inválido |
-| `garraia whatsapp link --allow <número> [--owner]` | O `link` com a pergunta pós-QR já respondida; continua exigindo terminal (exit 69 num pipe) |
+| `garraia whatsapp link --allow <número> [--owner]` | O `link` com a pergunta pós-QR já respondida; continua exigindo terminal (exit 69 num pipe). Desde a v0.4.6 o wizard termina imprimindo a política de acesso em vigor (#1429) |
+
+### Access Policy v2 — quem entra e até onde vai (v0.4.6, ADR 0025)
+
+O nível é um **teto que compõe com o modo da sessão: só tira, nunca põe.** Identidade aparece só pelos quatro últimos dígitos em toda tela e em todo `--json`; `--reveal` mostra os valores da config, localmente. Todo comando abaixo deixa rastro no audit (#1414). Exit codes: 0 ok · 65 número ou combinação inválida · 70 config ilegível · 73 gravou mas o audit falhou.
+
+| Comando | O que faz |
+|---|---|
+| `garraia whatsapp access [--reveal]` | Sem subcomando, imprime a política **efetiva** pelo mesmo motor do turno: admissão (`restricted` \| `open`), default do desconhecido, grupos, e cada principal com piso, nível e o que pode de fato (#1396) |
+| `garraia whatsapp users [--json]` | Só lê: quem pode falar, com o papel (`allow` ou `owners`) e os quatro últimos dígitos (#1393) |
+| `garraia whatsapp level <número> chat\|read\|full [--dry-run]` | Teto de acesso de um número; `--dry-run` mostra o impacto sem gravar. Nível em dono não vale — use `unowner` (#1398) |
+| `garraia whatsapp write <número> on\|off` | Mexe **só** em escrita de arquivo (nativa e MCP): não liga `bash`, não desliga sandbox, jail nem confirmação (#1397) |
+| `garraia whatsapp block <número>` · `unblock` | Bloqueio vence `open`, `allow` e pareamento; vale na mensagem seguinte, sem restart |
+| `garraia whatsapp remove <número> [--yes]` | Espelho do `allow`: tira de `allow` e de `owners` sem desligar o canal. Remover um DONO exige confirmação (exit 64 num pipe sem `--yes`); quem não estava na lista sai 0, porque revogar é idempotente (#1394) |
+| `garraia whatsapp owner <número> [--yes]` | Promove a DONO — só com `execution.profile = isolated-pod` (exit 64 fora dele). Quem ainda não estava autorizado passa a estar, e a tela avisa (#1395) |
+| `garraia whatsapp unowner <número>` | Tira o papel de dono **sem** tirar o acesso: a entrada passa para `allow` na mesma escrita. Funciona em qualquer perfil (#1395) |
+| `garraia doctor whatsapp [--json]` | Percorre o caminho inteiro: vínculo, chave da sessão, gateway, política de acesso, perfil de execução, workspace, visibilidade do MCP e provedor. Exit 0 ok, 69 indisponível — com a linha que diz o quê (#1419) |
+
+Grupos ligados e desligados valem na mensagem seguinte, sem restart, e cada grupo tem política própria (#1412). O `access.groups.enabled` declarado vence o `reply_in_groups` legado (#1501). No Web Console, a mesma política pela mesma API está na página **WhatsApp Access**, com preview do efeito antes de confirmar (#1402–#1405), e o botão **Test WhatsApp** roda o mesmo motor do `doctor whatsapp` (#1420).
 
 Guia completo: [docs/whatsapp.md](https://github.com/michelbr84/GarraRUST/blob/main/docs/whatsapp.md).
 
