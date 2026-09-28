@@ -169,6 +169,20 @@ impl LlmProvider for PedeBash {
 /// porque a aprovacao nunca dependeu do marcador no texto.
 #[tokio::test]
 pub(super) async fn pedido_do_bash_chega_sem_marcador_e_o_sim_ainda_retoma() {
+    // Este teste OBSERVA o `PATH` do processo: ele compara a saida de
+    // `printenv PATH` no filho com o `std::env::var("PATH")` que le depois.
+    // O `PATH` e global, e `sandbox_spawn::testes::RuntimeFalso` o reescreve
+    // (prepende um tempdir para plantar um `docker` falso, e devolve o valor
+    // no `Drop`), entao sem a trava os dois lados podem vir de valores
+    // diferentes: o filho nasce com o `PATH` limpo e a leitura de baixo ja
+    // ve o tempdir na frente. Foi assim que a #1523 caiu no job
+    // `Run clippy + tests (mcp)` — com o comando executado e a saida ja
+    // vista pelo modelo, so os dois `PATH` diferiam. A trava e a mesma que
+    // os testes de sandbox usam entre si; quem le o `PATH` tem de entrar
+    // na fila tambem. Em Windows nao existe `RuntimeFalso` e nem a trava.
+    #[cfg(unix)]
+    let _trava_do_path = crate::sandbox_spawn::testes::TRAVA_DO_PATH.lock().await;
+
     let rt = AgentRuntime::new();
     rt.register_tool(Box::new(crate::tools::BashTool::new_with_confirmation(
         None,

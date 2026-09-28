@@ -302,8 +302,10 @@ pub(super) async fn tool_program_respeita_o_orcamento_de_chamadas_do_turno() {
 }
 
 /// O outro lado do achado acima: quando e a TAREFA que esgota (nao so
-/// o turno), o `tool_program` aborta a conversa — mesma classe de erro
-/// que o loop principal ja usa nesse caso. Perfil customizado com
+/// o turno), o `tool_program` aborta a conversa. O loop principal, no
+/// mesmo caso, ja nao aborta: um lote paralelo que esgota a tarefa fecha
+/// numa volta final sem ferramentas (`orcamento_em_lote`) — alinhar o
+/// programa a isso e decisao a parte. Perfil customizado com
 /// `max_tool_loops = 5` faz `max_per_turn == max_per_task == 5`
 /// (`com_limites_do_modo`), entao os dois esgotam juntos e
 /// `atingiu_limite_turno` (que exige folga na tarefa) fica falso.
