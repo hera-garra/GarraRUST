@@ -36,6 +36,17 @@ updates:
           - "opentelemetry_sdk"
           - "opentelemetry-otlp"
           - "tracing-opentelemetry"
+      # utoipa e utoipa-swagger-ui trocam o tipo `utoipa::openapi::OpenApi`
+      # entre si: a swagger-ui declara `SwaggerUi::url(.., openapi: OpenApi)`
+      # contra uma serie especifica da utoipa. Bumpadas separadas, as PRs
+      # #1526 (utoipa 6.0) e #1529 (swagger-ui 10.0) ficaram as duas vermelhas
+      # com `E0308: mismatched types` — dois facades incompativeis no mesmo
+      # grafo. Mesma razao do grupo wasmtime acima, e declarado ANTES de
+      # patch-and-minor para casar tambem em major.
+      utoipa:
+        patterns:
+          - "utoipa"
+          - "utoipa-swagger-ui"
       patch-and-minor:
         update-types:
           - "patch"
