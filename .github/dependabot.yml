@@ -23,6 +23,19 @@ updates:
         patterns:
           - "wasmtime"
           - "wasmtime-wasi"
+      # A familia opentelemetry (+ tracing-opentelemetry, que depende do
+      # opentelemetry) precisa subir JUNTA: cada crate bumpada sozinha deixa
+      # duas versoes incompativeis no grafo e quebra o build. Foi o que
+      # aconteceu com os PRs #1527/#1528/#1530/#1531 em 2026-09-28, todos
+      # vermelhos isolados e verdes juntos. Mesma razao do grupo wasmtime:
+      # declarado ANTES de patch-and-minor e casando por pattern em qualquer
+      # update-type, inclusive majors.
+      opentelemetry:
+        patterns:
+          - "opentelemetry"
+          - "opentelemetry_sdk"
+          - "opentelemetry-otlp"
+          - "tracing-opentelemetry"
       # utoipa e utoipa-swagger-ui trocam o tipo `utoipa::openapi::OpenApi`
       # entre si: a swagger-ui declara `SwaggerUi::url(.., openapi: OpenApi)`
       # contra uma serie especifica da utoipa. Bumpadas separadas, as PRs
