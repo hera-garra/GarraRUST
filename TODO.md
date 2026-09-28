@@ -12,6 +12,52 @@ curtos para a próxima sessão autônoma.
 > históricas abaixo são registro da época, não estado atual. IDs `GAR-xxx`
 > permanecem como identificadores históricos.
 
+## Fechamento da v0.4.6 — 2026-09-27
+
+O branch `release/v0.4.6` havia sido cortado em 2026-09-25 e a `main` seguiu com
+**114 commits** depois disso (o trem #1510 e a PR #1519). Ninguém juntou os dois,
+então a `main` continuava em `0.4.5` e não existia tag. Esta rodada fechou isso.
+
+- **Merge do branch de release** com o que era único dele: bump 0.4.6 (workspace,
+  `Cargo.lock`, Garra Mobile `0.4.6+10`), plans 0363/0364/0365 e as páginas de
+  wiki. O fix de MCP do branch (#1518, PR #1520) era **idêntico** ao que a `main`
+  já tinha pela PR #1519.
+- **CHANGELOG remontado dos 60 fragmentos.** A seção `[0.4.6]` do branch vinha de
+  **18** e estava obsoleta: os fragmentos de #1429 e #1462 foram **reescritos** na
+  `main` depois do corte, então o texto do branch contradiria o código. Prosa de
+  abertura nova, cobrindo Access Policy v2, registro de capacidades, classes de
+  capacidade, circuit breaker, jail único do MCP `filesystem` e `POST /mcp`.
+- **Wiki reescrita e páginas permanentes atualizadas** (CLI, Configuração,
+  Segurança, Integração, ADRs, Home). As páginas v0.4.6 do branch afirmavam três
+  coisas já falsas: que a leitura `GET /api/sessions/{id}/history` ficava como
+  estava, que a #1429 era parcial, e que os dois avisos espúrios do
+  `/api/diagnostics` eram limite conhecido.
+- **Docs de release**: `ROADMAP.md` (a linha de release descrevia só a
+  estabilização), `CLAUDE.md` (dizia "24 ADRs" com a 0025 já aceita), os dois
+  READMEs (descreviam o WhatsApp pelo modelo `allow`/`owners` sem citar a v2) e
+  `plans/README.md` (0365 ausente, 0364 marcada como parada no gate).
+- **Higiene de branches**: de 8 para 2. Quatro estavam **100% mergeadas**
+  (`feat/1431`, `feat/1436`, `feat/1438`, `fix/playwright-sessoes-vazias`) e duas
+  eram cabeça de PR **fechada por decisão** — `fix/1452-pin-toolchain` (o
+  `rust-toolchain.toml` quebra o cross-compile do CI; a #1452 saiu pelo
+  `scripts/setup-toolchain.sh`) e `fix/1456-minio-pull-retry` (401 sustentado não
+  cede a backoff; a #1458 passou a construir a imagem do fonte). O motivo de cada
+  uma ficou registrado nas PRs #1454 e #1457, com o SHA para recuperação.
+- **Gate de dogfood D1/D9 (Linux) executado contra o candidato e PASSOU** —
+  `scripts/dogfood/linux-clean-install.sh --source local`, 13 passos, `.deb`
+  `0.4.6` num `ubuntu:24.04` cru, resposta real do modelo, sobrevivência ao
+  `restart`. D2/D4/D5/D6 e o trecho WhatsApp de D1/D3 seguem **pendentes do dono**
+  (telefone, Windows, sessão gráfica).
+
+### Fica aberto, com bloqueio nomeado
+
+| Item | Bloqueio |
+| --- | --- |
+| #1433, #1434, #1435 | decisão de escopo do dono: milestone v0.4.7, implementar só a #1434, ou fechar. Não são bloqueio de release |
+| Linhas D2/D4/D5/D6 do dogfood | telefone, máquina Windows e sessão gráfica — só o dono |
+| Instaladores assinados | sem certificado Windows e sem Apple Developer ID no projeto |
+| `mcp.servers` na instalação limpa | `filesystem retrying (causa: other)` não diz que **falta Node**; higiene na linha da #1437, candidata a issue pós-release |
+
 ## Concluído em 2026-09-26 — trem v0.4.6: acesso ao WhatsApp de ponta a ponta, honestidade do runtime e dogfood
 
 Ciclo de 26 issues (P0/P1 quase todo) fechado num único trem de merge (PR #1510,
