@@ -275,6 +275,39 @@ impl ExecutionBudget {
         self.current_task_calls
     }
 
+    /// O teto de chamadas da tarefa inteira, para a mensagem que fecha o
+    /// turno quando ele acaba.
+    pub fn teto_da_tarefa(&self) -> usize {
+        self.max_per_task
+    }
+
+    /// O resultado que volta ao modelo no lugar de uma chamada que passaria
+    /// do teto — a de numero 11 de um lote paralelo de 15, por exemplo. A
+    /// chamada nao roda nem conta.
+    ///
+    /// Com folga na tarefa, o laco do turno reseta o teto da volta e o
+    /// modelo pode pedir de novo o que faltou; sem folga, o turno segue para
+    /// a volta final e ele tem de responder com o que ja coletou. A mensagem
+    /// diz qual dos dois, para ele nao repetir o lote inteiro.
+    pub fn recusa_por_orcamento(&self) -> String {
+        if self.atingiu_limite_turno() {
+            format!(
+                "Chamada NAO executada: esta resposta ja usou as {} chamadas de \
+                 ferramenta permitidas por volta ({}). Peca de novo, na proxima volta, \
+                 so o que ainda faltar.",
+                self.max_per_turn,
+                self.status()
+            )
+        } else {
+            format!(
+                "Chamada NAO executada: acabou o orcamento de {} chamadas de ferramenta \
+                 desta tarefa ({}). Responda com o que ja foi coletado.",
+                self.max_per_task,
+                self.status()
+            )
+        }
+    }
+
     /// Verifica se ainda é permitido chamar outra ferramenta.
     pub fn pode_chamar_ferramenta(&self) -> bool {
         self.current_turn_calls < self.max_per_turn && self.current_task_calls < self.max_per_task

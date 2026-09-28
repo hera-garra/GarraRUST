@@ -56,6 +56,9 @@ mod metricas_de_memoria;
 mod nota_garra_status;
 /// #1438: o despacho alimenta o registro de confiabilidade.
 mod observabilidade;
+/// Lote paralelo de `tool_use` acima do teto: nada roda alem dele, e o
+/// orcamento esgotado fecha o turno numa volta final em vez de erro.
+mod orcamento_em_lote;
 mod portao_e_fixtures;
 mod repo_search_git_e_recall;
 mod roteamento_e_fatos;

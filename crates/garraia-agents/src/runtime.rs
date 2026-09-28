@@ -521,6 +521,57 @@ fn com_nota_de_capacidades(
     })
 }
 
+/// A nota da volta final: o orcamento de ferramentas acabou e o modelo tem
+/// de responder com o que ja coletou. Vai no `system` do ultimo pedido do
+/// turno, e so nele.
+const NOTA_ORCAMENTO_ESGOTADO_PT: &str = "O orcamento de chamadas de ferramenta deste \
+pedido acabou. Nenhuma ferramenta pedida daqui em diante sera executada: responda ao \
+usuario agora, com o que ja foi coletado, e diga o que ficou de fora.";
+
+/// A mesma nota em EN. Mesmo contrato de [`NOTA_ORCAMENTO_ESGOTADO_PT`].
+const NOTA_ORCAMENTO_ESGOTADO_EN: &str = "The tool-call budget for this request is \
+exhausted. No tool requested from now on will run: answer the user now, with what has \
+already been gathered, and say what was left out.";
+
+/// Acrescenta a nota da volta final ao prompt de sistema.
+///
+/// Sem folga para mais nenhuma ferramenta, o turno nao cai mais em
+/// `execution budget exceeded` com os resultados ja coletados jogados fora:
+/// o modelo ganha UMA volta a mais, avisado aqui, e nada que ele pedir nela
+/// roda. A nota vai no `system`, e nao numa mensagem nova, porque a ultima
+/// mensagem do historico e a dos `ToolResult` — e os providers tratam cada
+/// um a sua maneira uma mensagem de usuario colada nela.
+fn com_nota_de_orcamento_esgotado(
+    system: Option<String>,
+    lang: crate::persona::Lang,
+) -> Option<String> {
+    let nota = match lang {
+        crate::persona::Lang::Pt => NOTA_ORCAMENTO_ESGOTADO_PT,
+        crate::persona::Lang::En => NOTA_ORCAMENTO_ESGOTADO_EN,
+    };
+    Some(match system {
+        Some(s) => format!("{s}\n\n{nota}"),
+        None => nota.to_string(),
+    })
+}
+
+/// O que fecha o turno quando, na volta final, o modelo so pede ferramenta
+/// e nao escreve nada. Diz o limite, para o usuario saber o que mudar no
+/// pedido — e nao manda tentar de novo, porque o mesmo pedido esgota o
+/// mesmo orcamento.
+fn mensagem_de_orcamento_esgotado(teto: usize, lang: crate::persona::Lang) -> String {
+    match lang {
+        crate::persona::Lang::Pt => format!(
+            "Parei aqui: este pedido precisou de mais chamadas de ferramenta do que o \
+             limite deste modo permite ({teto}). Tente pedir uma parte por vez."
+        ),
+        crate::persona::Lang::En => format!(
+            "I stopped here: this request needed more tool calls than this mode allows \
+             ({teto}). Try asking for one part at a time."
+        ),
+    }
+}
+
 /// O desfecho de uma chamada de tool, no unico ponto de despacho (#1226 S-A).
 ///
 /// As quatro copias do loop de turno recebem um destes desfechos e tratam so
@@ -540,9 +591,11 @@ enum DispatchOutcome {
     /// passos seguintes rodavam sobre uma dependencia quebrada.
     Result(ContentBlock, bool),
 
-    /// O gate do modo negou (#988): o `ToolResult` de recusa, tambem pronto
-    /// para a lista — o modelo le e segue sem a ferramenta. Nao e erro do
-    /// turno de proposito.
+    /// A chamada nao rodou — o gate do modo negou (#988), a ferramenta esta
+    /// indisponivel (#1425), o breaker da sessao esta aberto (#1417) ou ela
+    /// passaria do teto do orcamento (lote paralelo): o `ToolResult` de
+    /// recusa, tambem pronto para a lista — o modelo le e segue sem a
+    /// ferramenta. Nao e erro do turno de proposito.
     Denied(ContentBlock),
 
     /// A tool pede confirmacao humana (GAR-187): o resultado entra na lista
@@ -633,6 +686,45 @@ async fn desfecho_de_loop(
         }),
         VereditoDeLoop::Abortar(mensagem) => DispatchOutcome::BudgetExceeded { mensagem },
     }
+}
+
+/// Uma chamada que passaria do teto do orcamento: nao roda.
+///
+/// O modelo pode pedir varias ferramentas numa resposta so, e o laco do
+/// turno so confere o orcamento antes de chamar o modelo — um lote de 15
+/// rodava inteiro contra um teto de 10. A recusa volta como resultado da
+/// propria chamada (todo `tool_use` precisa do seu), dizendo se ha folga
+/// para pedir de novo na proxima volta. O par de eventos sai como o de
+/// [`desfecho_de_loop`]: a UI ve a chamada, fechada com `success: false`.
+async fn desfecho_sem_orcamento(
+    sink: Option<&TurnSink>,
+    id: &str,
+    name: &str,
+    input: &serde_json::Value,
+    budget: &ExecutionBudget,
+) -> DispatchOutcome {
+    let recusa = budget.recusa_por_orcamento();
+    warn!(
+        tool = %name,
+        orcamento = %budget.status(),
+        "chamada acima do teto do orcamento; nao executada"
+    );
+    if let Some(sink) = sink.filter(|s| s.wants_tool_events()) {
+        sink.tool_started(name, summarize_tool_input(name, input))
+            .await;
+        sink.tool_finished(
+            name,
+            std::time::Duration::ZERO,
+            false,
+            "bloqueada: orcamento de ferramentas esgotado".to_string(),
+            capture_tool_output(&recusa),
+        )
+        .await;
+    }
+    DispatchOutcome::Denied(ContentBlock::ToolResult {
+        tool_use_id: id.to_string(),
+        content: recusa,
+    })
 }
 
 /// #1339: so um pedido de confirmacao pode carregar marcador no historico.
@@ -1824,18 +1916,30 @@ impl AgentRuntime {
                 info!("auto-reset turn budget, continuing agent loop");
             }
 
-            // Check if task limit is reached (hard limit)
-            if !budget.pode_chamar_ferramenta() {
-                return Err(Error::Agent(format!(
-                    "execution budget exceeded: {}",
+            // Sem orcamento para mais nenhuma ferramenta, o turno nao cai mais
+            // em `execution budget exceeded` com os resultados ja coletados
+            // jogados fora: o modelo ganha UMA volta final, avisado no
+            // `system`, e nada que ele pedir nela roda (ver o fim do turno
+            // logo abaixo). Normalmente se chega aqui depois de uma volta de
+            // ferramentas, com resultado novo para ele usar; com teto zero
+            // configurado (`max_tool_calls = 0`), a primeira volta ja e a
+            // final e ele responde sem ferramenta nenhuma.
+            let volta_final = !budget.pode_chamar_ferramenta();
+            if volta_final {
+                info!(
+                    "orcamento de ferramentas esgotado ({}); volta final sem ferramentas",
                     budget.status()
-                )));
+                );
             }
 
             let request = LlmRequest {
                 model: effective_model.clone(),
                 messages: messages.clone(),
-                system: system.clone(),
+                system: if volta_final {
+                    com_nota_de_orcamento_esgotado(system.clone(), self.persona_lang)
+                } else {
+                    system.clone()
+                },
                 max_tokens: Some(effective_max_tokens),
                 temperature: None,
                 tools: tool_defs.clone(),
@@ -1862,8 +1966,20 @@ impl AgentRuntime {
                 .iter()
                 .any(|block| matches!(block, ContentBlock::ToolUse { .. }));
 
-            if !has_tool_use {
-                let final_text = extract_text(&response.content);
+            if !has_tool_use || volta_final {
+                let final_text = if has_tool_use {
+                    // Volta final: o modelo pediu ferramenta mesmo avisado.
+                    // Nada roda; o turno fecha com o que ele escreveu ou, sem
+                    // texto, com a mensagem que diz o limite.
+                    warn!(
+                        "volta final: o modelo pediu ferramentas com o orcamento esgotado; nenhuma roda"
+                    );
+                    extract_text_opt(&response.content).unwrap_or_else(|| {
+                        mensagem_de_orcamento_esgotado(budget.teto_da_tarefa(), self.persona_lang)
+                    })
+                } else {
+                    extract_text(&response.content)
+                };
                 info!(
                     "agent finished without tool calls (stop_reason={:?}, response_len={})",
                     response.stop_reason,
@@ -2556,17 +2672,25 @@ impl AgentRuntime {
                 info!("auto-reset turn budget, continuing agent loop");
             }
 
-            // Check if task limit is reached (hard limit)
-            if !budget.pode_chamar_ferramenta() {
-                return Err(Error::Agent(format!(
-                    "execution budget exceeded: {}",
+            // Sem orcamento para mais nenhuma ferramenta: volta final, como no
+            // caminho nao-streaming. Nada que o modelo pedir nela roda; ver o
+            // fim do turno nos dois ramos abaixo. Um redo (#1048/#1176) volta
+            // aqui com o mesmo orcamento e cai na mesma volta final.
+            let volta_final = !budget.pode_chamar_ferramenta();
+            if volta_final {
+                info!(
+                    "orcamento de ferramentas esgotado ({}); volta final sem ferramentas",
                     budget.status()
-                )));
+                );
             }
             let request = LlmRequest {
                 model: effective_model.clone(),
                 messages: messages.clone(),
-                system: system.clone(),
+                system: if volta_final {
+                    com_nota_de_orcamento_esgotado(system.clone(), self.persona_lang)
+                } else {
+                    system.clone()
+                },
                 max_tokens: Some(effective_max_tokens),
                 temperature: None,
                 tools: tool_defs.clone(),
@@ -2684,6 +2808,28 @@ impl AgentRuntime {
                         response_text.len(),
                         tool_uses.len()
                     );
+
+                    // Volta final: o que o modelo pedir nao roda. O turno fecha
+                    // com o texto dele ou, sem texto, com a mensagem que diz o
+                    // limite — que vai ao canal como qualquer texto. Antes da
+                    // guarda de turno vazio de proposito: um lote so de
+                    // ferramentas nao e turno vazio, e o redo em batch
+                    // esgotaria o mesmo orcamento de novo.
+                    if volta_final && !tool_uses.is_empty() {
+                        warn!(
+                            pedidas = tool_uses.len(),
+                            "volta final: o modelo pediu ferramentas com o orcamento esgotado; nenhuma roda"
+                        );
+                        tool_uses.clear();
+                        if response_text.trim().is_empty() {
+                            let aviso = mensagem_de_orcamento_esgotado(
+                                budget.teto_da_tarefa(),
+                                self.persona_lang,
+                            );
+                            sink.text(aviso.clone()).await;
+                            response_text = aviso;
+                        }
+                    }
 
                     if tool_uses.is_empty() {
                         // #1048: volta sem texto e sem ferramenta. Sem isto o
@@ -2891,7 +3037,17 @@ impl AgentRuntime {
 
                     let has_tool_use = tool_calls_count > 0;
 
-                    if !has_tool_use {
+                    // Volta final (orcamento esgotado): o que o modelo pedir
+                    // nao roda, e o turno fecha aqui como se ele so tivesse
+                    // escrito — ver o braco `None if has_tool_use` abaixo.
+                    if has_tool_use && volta_final {
+                        warn!(
+                            pedidas = tool_calls_count,
+                            "volta final: o modelo pediu ferramentas com o orcamento esgotado; nenhuma roda"
+                        );
+                    }
+
+                    if !has_tool_use || volta_final {
                         // #1048: o batch nao deixava bolha em branco — deixava
                         // o marcador `[no textual response provided by the
                         // model]`, em ingles, que o usuario le como resposta do
@@ -2900,6 +3056,12 @@ impl AgentRuntime {
                         // publicar um marcador interno.
                         let final_text = match extract_text_opt(&response.content) {
                             Some(texto) => texto,
+                            // Volta final so com ferramentas: nao e turno
+                            // vazio, e a mensagem que diz o limite fecha.
+                            None if has_tool_use => mensagem_de_orcamento_esgotado(
+                                budget.teto_da_tarefa(),
+                                self.persona_lang,
+                            ),
                             None if full_response.is_empty() => {
                                 return Err(Error::Agent(
                                     "o modelo devolveu um turno vazio (batch: sem texto e sem ferramenta)"
@@ -3092,6 +3254,17 @@ impl AgentRuntime {
         name: &str,
         input: &serde_json::Value,
     ) -> DispatchOutcome {
+        // O orcamento, chamada a chamada. O laco do turno so confere antes de
+        // chamar o modelo, e um lote paralelo (varios `tool_use` na mesma
+        // resposta) passava inteiro: 15 rodavam contra um teto de 10 e, sem
+        // folga na tarefa, o turno ainda caia em erro com os resultados
+        // jogados fora. Antes do registro de proposito: a chamada recusada
+        // nao conta no orcamento nem entra na janela de loop. Os passos de
+        // um `tool_program` nunca chegam aqui sem orcamento — o programa
+        // confere antes de cada passo e para com relatorio parcial.
+        if !budget.pode_chamar_ferramenta() {
+            return desfecho_sem_orcamento(sink, id, name, input, budget).await;
+        }
         if name == TOOL_PROGRAM_NAME {
             // #1226 (achado de revisao): o envelope gasta orcamento, mas nao
             // entra na janela de loop. Cada passo volta por aqui e registra a
