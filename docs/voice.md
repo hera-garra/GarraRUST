@@ -104,6 +104,91 @@ GarraIA talks to it over the Gradio API
 (`POST /gradio_api/call/generate_tts_audio`), which is what
 `multilingual_app.py` exposes. The `chatterbox-tts` PyPI wheel is a
 library only and has no `serve` subcommand.
+### Known pitfalls with the stock app
+
+Two things bite the first time you run the stock `multilingual_app.py`
+against GarraIA. Both are worked around locally below.
+
+#### 1. Health-probe route mismatch
+
+GarraIA probes the endpoint with `GET /gradio_api/config`. Gradio never
+served that route — it serves the app config at `/config` (confirmed on
+gradio 5.50.0 and 6.8.0: `/gradio_api/config` -> 404, `/config` -> 200) —
+so a healthy server still fails the probe and voice mode stays off:
+
+```text
+WARN garraia_voice::tts::chatterbox_client: Chatterbox health check failed:
+  error sending request for url (http://127.0.0.1:7860/gradio_api/config)
+```
+
+Workaround: run the app behind a ~20-line wrapper that adds the missing
+route as a redirect (`serve_garra.py` next to `multilingual_app.py`):
+
+```python
+"""Serve the Chatterbox multilingual app in the shape GarraIA expects."""
+import os
+
+import gradio as gr
+import uvicorn
+
+# Neutralize the demo.launch() executed at module import time: the
+# wrapper mounts the app into its own FastAPI instead.
+gr.Blocks.launch = lambda self, *args, **kwargs: None
+
+import multilingual_app  # noqa: E402  (builds demo; launch neutralized)
+
+from fastapi import FastAPI  # noqa: E402
+from fastapi.responses import RedirectResponse  # noqa: E402
+
+app = FastAPI()
+
+@app.get("/gradio_api/config", include_in_schema=False)
+async def gradio_api_config():
+    """Compat bridge: GarraIA probes /gradio_api/config; Gradio serves /config."""
+    return RedirectResponse(url="/config", status_code=307)
+
+gr.mount_gradio_app(app, multilingual_app.demo, path="/")
+
+if __name__ == "__main__":
+    uvicorn.run(
+        app,
+        host=os.getenv("GRADIO_SERVER_NAME", "127.0.0.1"),
+        port=int(os.getenv("GRADIO_SERVER_PORT", "7860")),
+        log_level="info",
+    )
+```
+
+Run it instead of the raw app:
+
+```bash
+GRADIO_SERVER_NAME=127.0.0.1 GRADIO_SERVER_PORT=7860 \
+  python serve_garra.py
+```
+
+Once the probe goes green, voice mode enables:
+
+```text
+INFO garraia_gateway::server: Voice mode enabled - Chatterbox TTS at http://127.0.0.1:7860
+INFO garraia_gateway::health: tts-chatterbox 2ms (green)
+```
+
+#### 2. Default voice prompts are remote URLs
+
+Every language's default reference voice is a
+`https://storage.googleapis.com/...` URL, and `multilingual_app.py`
+passes it verbatim to `librosa.load`, which only opens local files.
+Synthesis without an uploaded voice fails:
+
+```text
+FileNotFoundError: [Errno 2] No such file or directory:
+  'https://storage.googleapis.com/chatterbox-demo-samples/mtl_prompts/pt_m1.flac'
+```
+
+Workaround: upload a reference voice per synthesis, or patch
+`resolve_audio_prompt()` in `multilingual_app.py` to download each
+default prompt once into a local cache and return the local path (fix
+proposed upstream - see the linked issue).
+
 
 Features:
 - Multilingual (pt, en, es, fr, de, it, hi)
@@ -251,10 +336,14 @@ curl -X POST 'http://127.0.0.1:3888/api/tts?fallback=false' \
 
 ### TTS not responding
 
-Check TTS server:
+The stock Gradio app does not serve `/health`; check the config route:
 ```bash
-curl http://127.0.0.1:7860/health
+curl -sL http://127.0.0.1:7860/config -o /dev/null -w '%{http_code}\n'
 ```
+
+If that returns `200` but `garraia health` still reports
+`❌ tts-chatterbox`, you are hitting the health-probe route mismatch
+described under *Known pitfalls* above.
 
 ### Audio quality issues
 
