@@ -205,7 +205,18 @@ pub(crate) mod testes {
                 novo.push(":");
                 novo.push(antigo);
             }
-            // SAFETY: serializado por TRAVA_DO_PATH em todo teste que usa isto.
+            // SAFETY: serializado por TRAVA_DO_PATH em todo teste que usa
+            // isto.
+            //
+            // CUIDADO: o `PATH` e do PROCESSO, entao a trava nao e so entre
+            // as instancias daqui — ela e a fila de QUALQUER teste da lib
+            // que dependa do `PATH`. Enquanto um `RuntimeFalso` existe, todo
+            // teste rodando em paralelo ve o tempdir na frente. A #1523 caiu
+            // no CI exatamente por isso: um teste de aprovacao comparava a
+            // saida de `printenv PATH` no filho com o `std::env::var("PATH")`
+            // que lia depois, sem pegar a trava, e os dois lados vinham de
+            // valores diferentes. Teste novo que leia ou herde o `PATH`
+            // entra na fila com `TRAVA_DO_PATH.lock().await`.
             unsafe { std::env::set_var("PATH", novo) };
             Self { dir, path_antigo }
         }
