@@ -812,8 +812,9 @@ fn tools_capabilities_check(
             CheckStatus::Warning,
             Some(format!(
                 "cada item traz o motivo; numa conversa, `garra_status` mostra o mesmo registro. \
-                 Servidor MCP fora do ar: `{bin} mcp restart <nome>`; canal desconectado: veja \
-                 `runtime.channels`"
+                 Servidor MCP fora do ar: o supervisor reinicia sozinho (`restart_delay_secs`/\
+                 `max_restarts` no `mcp.json`); para forcar o ciclo, `{bin} restart` ou o console \
+                 (MCP Servers); canal desconectado: veja `runtime.channels`"
             )),
         )
     } else {
@@ -1711,6 +1712,16 @@ mod tests {
         assert!(c.detail.contains("memoria/* (retrying)"), "{}", c.detail);
         assert!(
             c.next_step
+                .as_deref()
+                .unwrap_or_default()
+                .contains("max_restarts"),
+            "{c:?}"
+        );
+        // #1543: `garraia mcp restart <nome>` nao existe — o `garraia mcp` so
+        // tem list/inspect/resources/prompts, e o remediation nao pode mandar
+        // o operador rodar um comando que falha.
+        assert!(
+            !c.next_step
                 .as_deref()
                 .unwrap_or_default()
                 .contains("mcp restart"),

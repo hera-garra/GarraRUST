@@ -228,7 +228,7 @@ pub fn registro(e: &Entradas<'_>) -> Vec<Capacidade> {
                     s.state.as_str()
                 ),
                 Some(
-                    "Veja `mcp.servers` no `/api/diagnostics`; o operador reinicia o servidor pelo console (MCP Servers) ou com `garraia mcp restart <nome>`."
+                    "Veja `mcp.servers` no `/api/diagnostics`. O supervisor reinicia o servidor sozinho (`restart_delay_secs`/`max_restarts` no `mcp.json`); para forcar o ciclo, o operador reinicia o gateway pelo console (MCP Servers) ou com `garraia restart`."
                         .to_string(),
                 ),
             )
@@ -320,7 +320,7 @@ pub fn registro(e: &Entradas<'_>) -> Vec<Capacidade> {
                 s.state.as_str()
             ),
             remediation: Some(
-                "Veja `mcp.servers` no `/api/diagnostics`; o operador reinicia o servidor pelo console (MCP Servers) ou com `garraia mcp restart <nome>`."
+                "Veja `mcp.servers` no `/api/diagnostics`. O supervisor reinicia o servidor sozinho (`restart_delay_secs`/`max_restarts` no `mcp.json`); para forcar o ciclo, o operador reinicia o gateway pelo console (MCP Servers) ou com `garraia restart`."
                     .to_string(),
             ),
         });
